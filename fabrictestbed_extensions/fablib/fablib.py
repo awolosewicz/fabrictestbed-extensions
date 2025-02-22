@@ -2306,8 +2306,8 @@ Host * !bastion.fabric-testbed.net
         slice_id: str = None,
         user_only: bool = True,
         show_un_submitted: bool = False,
-        pcaps_dir: str = None,
-        name_prefix: str = None
+        pcaps_dir: str = ".query_analysis_pcaps",
+        name_prefix: str = "C"
     ) -> List[CrinkleSlice]:
         """
         Gets a list of Crinkle slices from the slice manager.
