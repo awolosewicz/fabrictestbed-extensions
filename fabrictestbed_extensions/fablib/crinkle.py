@@ -240,6 +240,8 @@ class CrinkleMonitor(Node):
         logging.info(f"{self.get_name()} get_monitor_data()")
         if "monitor_config" in self.get_user_data():
             data = self.get_user_data()["monitor_config"]
+            #data_iface_mappings = self.get_user_data()["iface_mappings"]
+            #logging.info(f"Retrieved monitor iface mappings as: {data_iface_mappings}")
             iface_mappings = {}
             for node_iface, (node_name, monitor_iface) in data["iface_mappings"].items():
                 iface_mappings[self.slice.get_interface(name=node_iface)] = (
@@ -279,6 +281,8 @@ class CrinkleMonitor(Node):
         }
         logging.info(f"Writing monitor config to user data: {data_dict}")
         user_data["monitor_config"] = data_dict
+        #logging.info(f"Writing monitor iface mappings to user data: {iface_mappings}")
+        #user_data["iface_mappings"] = iface_mappings
         self.set_user_data(user_data=user_data)
     
 class CrinkleSlice(Slice):
@@ -292,7 +296,6 @@ class CrinkleSlice(Slice):
             analyzer_name: str = None
     ):
         super().__init__(fablib_manager=fablib_manager, name=name, user_only=user_only)
-        self.submitted = False
         self.monitors: dict[str, CrinkleMonitor] = {}
         self.analyzer: CrinkleAnalyzer = None
         self.analyzer_name: str = None
@@ -643,11 +646,12 @@ class CrinkleSlice(Slice):
         if self.analyzer is None:
             raise Exception(f"Analyzer must be added before Crinkle slice submission using add_analyzer()")
         
-        super().submit(wait=wait, wait_timeout=wait_timeout, wait_interval=wait_interval, progress=progress, wait_jupyter=wait_jupyter, post_boot_config=post_boot_config, wait_ssh=wait_ssh,
+        return super().submit(wait=wait, wait_timeout=wait_timeout, wait_interval=wait_interval, progress=progress, wait_jupyter=wait_jupyter, post_boot_config=post_boot_config, wait_ssh=wait_ssh,
                        extra_ssh_keys=extra_ssh_keys, lease_start_time=lease_start_time, lease_end_time=lease_end_time, lease_in_hours=lease_in_hours, validate=validate)
-        # Necessary due to thread leakage somewhere causing the below to run multiple times, with stale memory
-        if self.submitted:
-            return self.slice_id
+    
+    def post_boot_config(self):
+        super().post_boot_config()
+        logging.info(f"Crinkle post_boot_config")
         self.analyzer = self.get_node(name=self.analyzer_name)
         site = self.analyzer.get_site()
         self.analyzer_cnet = self.get_l3network(name=f"{self.prefix}_net_{site}")
@@ -672,8 +676,7 @@ class CrinkleSlice(Slice):
             self.monitors[key] = refreshed_monitor
             refreshed_monitor.set_monitor_data()
             counter += 1
-        self.submitted = True
-        return self.slice_id
+        logging.info(f"Crinkle post_boot_config done")
         
     def start_bmv2(self, monitor: CrinkleMonitor, wait: bool=True):
         command = (f'p4c --target bmv2 --arch v1model {REMOTEWORKDIR}/base-crinkle.p4;'
