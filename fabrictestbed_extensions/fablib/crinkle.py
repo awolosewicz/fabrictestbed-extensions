@@ -620,6 +620,7 @@ class CrinkleSlice(Slice):
             for iface in interfaces:
                 iface_node_name = iface.get_node().get_name()
                 monitor_iface = monitor.add_component("NIC_Basic", f"{self.prefix}_nic_{iface_node_name}").get_interfaces()[0]
+                monitor_iface.set_mode("manual")
                 self.add_l2network(f"{name}-{iface_node_name}", [iface, monitor_iface], "L2Bridge", subnet, gateway, user_data)
                 monitor.data.net_type = type
                 monitor.creation_data.append((iface_node_name, iface.get_name(), f"{self.prefix}_nic_{iface_node_name}"))
@@ -656,13 +657,19 @@ class CrinkleSlice(Slice):
         site = self.analyzer.get_site()
         self.analyzer_cnet = self.get_l3network(name=f"{self.prefix}_net_{site}")
         self.cnets[site]=self.analyzer_cnet
+        jobs: list[futures.Future] = []
         counter = 0
         for key, monitor in self.monitors.items():
             logging.info(f"Refreshing monitor for net {key} after slice creation, count {counter}")
             refreshed_monitor = self.get_monitor(monitor.get_name())
             mon_site = refreshed_monitor.get_site()
             refreshed_monitor.execute(f"mkdir {REMOTEWORKDIR}")
-            refreshed_monitor.upload_file_thread(f"{LOCALP4DIR}/base-crinkle.p4", f"{REMOTEWORKDIR}/base-crinkle.p4")
+            jobs.append(refreshed_monitor.upload_file_thread(f"{LOCALP4DIR}/base-crinkle.p4", f"{REMOTEWORKDIR}/base-crinkle.p4"))
+            jobs.append(refreshed_monitor.execute_thread('source /etc/lsb-release; '
+                                                         'echo "deb http://download.opensuse.org/repositories/home:/p4lang/xUbuntu_${DISTRIB_RELEASE}/ /" | sudo tee /etc/apt/sources.list.d/home:p4lang.list; '
+                                                         'curl -fsSL https://download.opensuse.org/repositories/home:p4lang/xUbuntu_${DISTRIB_RELEASE}/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/home_p4lang.gpg > /dev/null; '
+                                                         'sudo apt-get update; '
+                                                         'sudo apt install -y p4lang-p4c'))
             if self.cnets[mon_site] is None or not self.cnets[mon_site].is_instantiated():
                 self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_net_{mon_site}")
             refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_net_{mon_site}")
@@ -676,17 +683,47 @@ class CrinkleSlice(Slice):
             self.monitors[key] = refreshed_monitor
             refreshed_monitor.set_monitor_data()
             counter += 1
+        logging.info(f"Crinkle post_boot_config waiting on jobs to finish")
+        print("Configuring Crinkle Resources")
+        futures.wait(jobs)
+        logging.info(f"Saving Crinkle Data")
+        self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
+        self.update()
         logging.info(f"Crinkle post_boot_config done")
         
     def start_bmv2(self, monitor: CrinkleMonitor, wait: bool=True):
-        command = (f'p4c --target bmv2 --arch v1model {REMOTEWORKDIR}/base-crinkle.p4;'
-                   f'nohup bash -c "sudo simple_switch {monitor.data.port_sequence} base-crinkle.json --log-file ~/monitor.log --log-flush -- --enable-swap" &')
+        command = (f'p4c --target bmv2 --arch v1model {REMOTEWORKDIR}/base-crinkle.p4 -o {REMOTEWORKDIR};'
+                   f'nohup bash -c "sudo simple_switch {monitor.data.port_sequence} {REMOTEWORKDIR}/base-crinkle.json --log-file ~/monitor.log -- --enable-swap" &')
         job = None
         if wait:
             monitor.execute(command=command)
         else:
             job = monitor.execute_thread(command=command)
         return job
+    
+    def configure_bridging(self, monitor: CrinkleMonitor, wait: bool=True):
+        p4_commands = []
+        if monitor.data.net_type in ["L2Bridge", "L2STS", "L2PTP"]:
+            p4_commands = ["table_add table_l2_bridge l2_bridge 0 => 1",
+                           "table_add table_l2_bridge l2_bridge 1 => 0"]
+        p4_command_chain = ""
+        for command in p4_commands[:-1]:
+            p4_command_chain += command+'\n'
+        p4_command_chain += command
+        job = None
+        if wait:
+            monitor.execute(f'echo -e "{p4_command_chain}" | simple_switch_CLI')
+        else:
+            job = monitor.execute_thread(f'echo -e "{p4_command_chain}" | simple_switch_CLI')
+        return job
+    
+    def configure_all_bridging(self):
+        logging.info(f"Adding default bmv2 rules for monitors")
+        jobs = []
+        for monitor in self.monitors.values():
+            jobs.append(self.configure_bridging(monitor=monitor, wait=False))
+        logging.info(f"Waiting for rules jobs to finish")
+        futures.wait(jobs)
     
     def start_monitor(self, monitor: CrinkleMonitor, wait: bool=True) -> tuple[list[futures.Future], futures.Future]:
         if monitor is None:
@@ -695,9 +732,9 @@ class CrinkleSlice(Slice):
         for _, (iface_node_name, mon_iface) in monitor.data.iface_mappings.items():
             logging.info(f"Starting Monitor for network {monitor.get_name()} iface for {iface_node_name} ")
             mon_iface_name = mon_iface.get_device_name()
-            logging.info(f"tcpdump: sudo tcpdump -vvvxxen -i {mon_iface_name} -w {monitor.data.net_name}/{iface_node_name}.pcap")
-            tcpdumps.append(monitor.execute_thread(command=f"sudo tcpdump -vvvxxen -i {mon_iface_name} -w {monitor.data.net_name}/{iface_node_name}.pcap"))
-        bmv2_start = self.start_bmv2(monitor=monitor, wait=False)
+            logging.info(f"tcpdump: sudo tcpdump -vvvxxenK -i {mon_iface_name} -w {monitor.data.net_name}/{iface_node_name}.pcap")
+            tcpdumps.append(monitor.execute_thread(command=f"sudo tcpdump -vvvxxenK -i {mon_iface_name} -w {monitor.data.net_name}/{iface_node_name}.pcap"))
+        bmv2_start = self.start_bmv2(monitor=monitor, wait=wait)
         if wait:
             tcpdumps2: list[futures.Future] = []
             for tcpdump in tcpdumps:
@@ -713,8 +750,8 @@ class CrinkleSlice(Slice):
                     logging.info(f"Waiting for {monitor.data.net_name} monitor to finish starting tcpdump processes ")
                     count = 0
                 count += 1
-            logging.info(f"Waiting for {monitor.data.net_name} monitor to finish starting bmv2 processes ")
-            futures.wait(bmv2_start)
+            logging.info(f"Adding default bmv2 rules for {monitor.data.net_name} monitor")
+            self.configure_bridging(monitor=monitor, wait=True)
         return [tcpdumps, bmv2_start]
         
     def start_all_monitors(self, wait: bool=True):
@@ -742,12 +779,13 @@ class CrinkleSlice(Slice):
                 count += 1
             logging.info(f"Waiting for monitors to finish starting bmv2 processes ")
             futures.wait(bmv2_list)
+            self.configure_all_bridging()
         return tcpdumps
 
     def stop_monitor(self, monitor: CrinkleMonitor):
         if monitor is None:
             raise Exception("mon_net cannot be None")
-        monitor.execute("sudo killall tcpdump")
+        monitor.execute("sudo killall tcpdump; sudo killall simple_switch")
 
     def stop_all_monitors(self):
         for monitor in self.monitors.values():
