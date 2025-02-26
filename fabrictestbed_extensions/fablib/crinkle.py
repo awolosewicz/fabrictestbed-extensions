@@ -4,6 +4,7 @@ import ipaddress
 import json
 import logging
 import enum
+import shutil
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -647,6 +648,44 @@ class CrinkleSlice(Slice):
         if self.analyzer is None:
             raise Exception(f"Analyzer must be added before Crinkle slice submission using add_analyzer()")
         
+        allocated = {}
+        logging.info("Allocating Monitors and their connected Nodes to different worker hosts")
+        for _, monitor in self.monitors.items():
+            if monitor.data.net_type == "L2Bridge":
+                endpoint1 = self.get_node(name=monitor.creation_data[0][0])
+                endpoint2 = self.get_node(name=monitor.creation_data[1][0])
+                endpoints = [endpoint1, endpoint2]
+                fablib = self.get_fablib_manager()
+                site = fablib.get_resources().get_site(endpoint1.get_site())
+                hosts = site.get_hosts()
+                endhosts = {}
+                for endpoint in endpoints:
+                    if endpoint.get_host() is not None:
+                        continue
+                    foundhost = False
+                    for host in hosts.values():
+                        allocated_comps = allocated.setdefault(host.get_name(), {})
+                        if fablib._FablibManager__can_allocate_node_in_host(
+                            host=host, node=endpoint, allocated=allocated_comps, site=site)[0]:
+                            endpoint.set_host(host_name=host.get_name())
+                            endhosts.setdefault(host.get_name(), True)
+                            foundhost = True
+                            logging.info(f'Node {endpoint.get_name()} assigned to {host.get_name()}')
+                            break
+                    if not foundhost:
+                        raise Exception(f"Could not place node {endpoint.get_name()}")
+                for host in hosts.values():
+                    if host.get_name() in endhosts:
+                        continue
+                    allocated_comps = allocated.setdefault(host.get_name(), {})
+                    if fablib._FablibManager__can_allocate_node_in_host(
+                        host=host, node=monitor, allocated=allocated_comps, site=site)[0]:
+                        monitor.set_host(host_name=host.get_name())
+                        logging.info(f'Node {monitor.get_name()} assigned to {host.get_name()}')
+                        break
+                if monitor.get_host() is None:
+                    raise Exception(f"Could not place monitor for network {monitor.data.net_name}")
+        
         return super().submit(wait=wait, wait_timeout=wait_timeout, wait_interval=wait_interval, progress=progress, wait_jupyter=wait_jupyter, post_boot_config=post_boot_config, wait_ssh=wait_ssh,
                        extra_ssh_keys=extra_ssh_keys, lease_start_time=lease_start_time, lease_end_time=lease_end_time, lease_in_hours=lease_in_hours, validate=validate)
     
@@ -675,7 +714,7 @@ class CrinkleSlice(Slice):
             refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_net_{mon_site}")
             for data in monitor.creation_data:
                 logging.info(f"Initializing monitor after slice creation with data: {data}")
-                iface = self.get_node(name=data[MonNetData.NODENAME]).get_interface(name=data[MonNetData.IFACENAME])
+                iface: Interface = self.get_node(name=data[MonNetData.NODENAME]).get_interface(name=data[MonNetData.IFACENAME])
                 mon_iface = refreshed_monitor.get_component(name=data[MonNetData.MIFACENAME]).get_interfaces()[0]
                 refreshed_monitor.data.iface_mappings[iface] = (data[MonNetData.NODENAME], mon_iface)
                 refreshed_monitor.data.port_sequence += f"-i{refreshed_monitor.data.port_nums}@{mon_iface.get_device_name()} "
@@ -693,7 +732,7 @@ class CrinkleSlice(Slice):
         
     def start_bmv2(self, monitor: CrinkleMonitor, wait: bool=True):
         command = (f'p4c --target bmv2 --arch v1model {REMOTEWORKDIR}/base-crinkle.p4 -o {REMOTEWORKDIR};'
-                   f'nohup bash -c "sudo simple_switch {monitor.data.port_sequence} {REMOTEWORKDIR}/base-crinkle.json --log-file ~/monitor.log -- --enable-swap" &')
+                   f'nohup bash -c "sudo simple_switch {monitor.data.port_sequence}{REMOTEWORKDIR}/base-crinkle.json --log-file ~/monitor.log -- --enable-swap; echo " 1> /dev/null 2> /dev/null &')
         job = None
         if wait:
             monitor.execute(command=command)
@@ -709,7 +748,7 @@ class CrinkleSlice(Slice):
         p4_command_chain = ""
         for command in p4_commands[:-1]:
             p4_command_chain += command+'\n'
-        p4_command_chain += command
+        p4_command_chain += p4_commands[-1]
         job = None
         if wait:
             monitor.execute(f'echo -e "{p4_command_chain}" | simple_switch_CLI')
@@ -733,7 +772,7 @@ class CrinkleSlice(Slice):
             logging.info(f"Starting Monitor for network {monitor.get_name()} iface for {iface_node_name} ")
             mon_iface_name = mon_iface.get_device_name()
             logging.info(f"tcpdump: sudo tcpdump -vvvxxenK -i {mon_iface_name} -w {monitor.data.net_name}/{iface_node_name}.pcap")
-            tcpdumps.append(monitor.execute_thread(command=f"sudo tcpdump -vvvxxenK -i {mon_iface_name} -w {monitor.data.net_name}/{iface_node_name}.pcap"))
+            tcpdumps.append(monitor.execute_thread(command=f"mkdir {monitor.data.net_name}; sudo tcpdump -vvvxxenK -i {mon_iface_name} -w {monitor.data.net_name}/{iface_node_name}.pcap"))
         bmv2_start = self.start_bmv2(monitor=monitor, wait=wait)
         if wait:
             tcpdumps2: list[futures.Future] = []
