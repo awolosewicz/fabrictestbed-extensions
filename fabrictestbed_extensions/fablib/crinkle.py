@@ -834,6 +834,6 @@ class CrinkleSlice(Slice):
         if monitor is None:
             raise Exception("mon_net cannot be None")
         shutil.rmtree(f"{self.pcaps_dir}/{monitor.data.net_name}/.", True)
-        monitor.download_directory(f"{self.pcaps_dir}/{monitor.data.net_name}", remote_directory_path=f"/home/ubuntu/{monitor.data.net_name}")
+        monitor.download_directory(f"{self.pcaps_dir}/{monitor.data.net_name}", remote_directory_path=f"{monitor.data.net_name}")
         self.analyzer.execute(f"sudo rm -rf {PCAPDIR}/{monitor.data.net_name}")
         self.analyzer.upload_directory(f"{self.pcaps_dir}/{monitor.data.net_name}", f"{PCAPDIR}/{monitor.data.net_name}")
