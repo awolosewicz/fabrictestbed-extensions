@@ -5,6 +5,7 @@ import json
 import logging
 import enum
 import shutil
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -16,8 +17,7 @@ if TYPE_CHECKING:
     from fabrictestbed_extensions.fablib.fablib import FablibManager
 
 from concurrent import futures
-from ipaddress import IPv4Address, ip_address
-
+from ipaddress import IPv6Address, ip_address
 from fabrictestbed.slice_editor import Node as FimNode
 
 from fabrictestbed.slice_editor import ExperimentTopology
@@ -42,6 +42,8 @@ class MonNetData(enum.IntEnum):
     NODENAME = 0
     IFACENAME = 1
     MIFACENAME = 2
+    ISSINK = 3
+    PORTNUM = 4
 
 class CrinkleAnalyzer(Node):
     default_image = "default_ubuntu_22"
@@ -148,7 +150,8 @@ class CrinkleMonitor(Node):
             net_name: str = None,
             net_type: str = None,
             cnet_iface: Interface = None,
-            iface_mappings: dict[Interface, tuple[str, Interface]] = {}
+            iface_mappings: dict[Interface, tuple[str, Interface, bool, int]] = {},
+            monitor_id: int = None
         ):
             self.port_nums = port_nums
             self.port_sequence = port_sequence
@@ -156,6 +159,7 @@ class CrinkleMonitor(Node):
             self.net_type = net_type
             self.cnet_iface = cnet_iface
             self.iface_mappings = iface_mappings
+            self.monitor_id = monitor_id
 
     def __init__(
         self,
@@ -166,7 +170,7 @@ class CrinkleMonitor(Node):
     ):
         super().__init__(slice=slice, node=node, validate=validate, raise_exception=raise_exception)
         self.get_monitor_data()
-        self.creation_data: list[tuple[str, str, str]] = [] # see MonNetData
+        self.creation_data: list[tuple[str, str, str, bool, int]] = [] # see MonNetData
 
     @staticmethod
     def new_node(
@@ -244,9 +248,9 @@ class CrinkleMonitor(Node):
             #data_iface_mappings = self.get_user_data()["iface_mappings"]
             #logging.info(f"Retrieved monitor iface mappings as: {data_iface_mappings}")
             iface_mappings = {}
-            for node_iface, (node_name, monitor_iface) in data["iface_mappings"].items():
+            for node_iface, (node_name, monitor_iface, is_sink, port_num) in data["iface_mappings"].items():
                 iface_mappings[self.slice.get_interface(name=node_iface)] = (
-                    node_name, self.slice.get_interface(name=monitor_iface)
+                    node_name, self.slice.get_interface(name=monitor_iface), is_sink, port_num
                 )
             self.data = self.MonitorData(
                 port_nums=data["port_nums"],
@@ -254,6 +258,7 @@ class CrinkleMonitor(Node):
                 net_name=data["net_name"],
                 net_type=data["net_type"],
                 cnet_iface=self.slice.get_interface(data["cnet_iface"]),
+                monitor_id=data["monitor_id"],
                 iface_mappings=iface_mappings
             )
             logging.info(f"Retrieved monitor config as: {self.data.__dict__}")
@@ -268,9 +273,9 @@ class CrinkleMonitor(Node):
         logging.info(f"{self.get_name()} set_monitor_data()")
         user_data = self.get_user_data()
         iface_mappings = {}
-        for node_iface, (node_name, monitor_iface) in self.data.iface_mappings.items():
+        for node_iface, (node_name, monitor_iface, is_sink, port_num) in self.data.iface_mappings.items():
             iface_mappings[node_iface.get_name()] = (
-                node_name, monitor_iface.get_name()
+                node_name, monitor_iface.get_name(), is_sink, port_num
             )
         data_dict = {
             "port_nums": self.data.port_nums,
@@ -278,6 +283,7 @@ class CrinkleMonitor(Node):
             "net_name": self.data.net_name,
             "net_type": self.data.net_type,
             "cnet_iface": self.data.cnet_iface.get_name(),
+            "monitor_id": self.data.monitor_id,
             "iface_mappings": iface_mappings
         }
         logging.info(f"Writing monitor config to user data: {data_dict}")
@@ -299,11 +305,13 @@ class CrinkleSlice(Slice):
         super().__init__(fablib_manager=fablib_manager, name=name, user_only=user_only)
         self.monitors: dict[str, CrinkleMonitor] = {}
         self.analyzer: CrinkleAnalyzer = None
-        self.analyzer_name: str = None
+        self.analyzer_name: str = analyzer_name
         self.cnets: dict[str, NetworkService] = {}
         self.analyzer_cnet: NetworkService = None
+        self.analyzer_iface: Interface = None
         self.pcaps_dir = pcaps_dir
         self.prefix = name_prefix
+        self.monitor_count = 0
 
     @staticmethod
     def new_slice(
@@ -372,6 +380,8 @@ class CrinkleSlice(Slice):
             if net.get_name().startswith(f"{name_prefix}_net_"):
                 slice.cnets[net.get_site()] = net
         slice.analyzer_cnet = slice.cnets[analyzer_site]
+        slice.analyzer_name = slice.analyzer.get_name()
+        slice.analyzer_iface = slice.analyzer.get_interface(network_name=slice.analyzer_cnet.get_name())
 
         for node in slice.get_nodes():
             node_name: str = node.get_name()
@@ -379,6 +389,7 @@ class CrinkleSlice(Slice):
                 monitor = slice.get_monitor(name=node_name)
                 monitor.get_monitor_data()
                 slice.monitors[monitor.data.net_name] = monitor
+                slice.monitor_count += 1
 
         return slice
     
@@ -550,6 +561,8 @@ class CrinkleSlice(Slice):
         monitor.add_route(subnet=self.analyzer_cnet.get_subnet(), next_hop=cnet.get_gateway())
         monitor.data.cnet_iface = monitor_cnet_iface
         monitor.data.net_name = net_name
+        monitor.data.monitor_id = self.monitor_count
+        self.monitor_count += 1
         monitor.set_monitor_data()
         
         return monitor
@@ -576,6 +589,7 @@ class CrinkleSlice(Slice):
         subnet: ipaddress = None,
         gateway: ipaddress = None,
         user_data: dict = {},
+        sinks: list[Interface] = []
     ) -> CrinkleMonitor:
         # Directly from NetworkService.__calculate_l2_nstype
         from fabrictestbed_extensions.fablib.facility_port import FacilityPort
@@ -624,7 +638,7 @@ class CrinkleSlice(Slice):
                 monitor_iface.set_mode("manual")
                 self.add_l2network(f"{name}-{iface_node_name}", [iface, monitor_iface], "L2Bridge", subnet, gateway, user_data)
                 monitor.data.net_type = type
-                monitor.creation_data.append((iface_node_name, iface.get_name(), f"{self.prefix}_nic_{iface_node_name}"))
+                monitor.creation_data.append((iface_node_name, iface.get_name(), f"{self.prefix}_nic_{iface_node_name}", (iface in sinks), 0))
             self.monitors[name] = monitor
         monitor.set_monitor_data()
         return monitor
@@ -643,48 +657,51 @@ class CrinkleSlice(Slice):
         lease_end_time: datetime = None,
         lease_in_hours: int = None,
         validate: bool = False,
+        allocate_hosts: bool = True
     ) -> str:
         logging.info("Crinkle submit()")
         if self.analyzer is None:
             raise Exception(f"Analyzer must be added before Crinkle slice submission using add_analyzer()")
         
-        allocated = {}
-        logging.info("Allocating Monitors and their connected Nodes to different worker hosts")
-        for _, monitor in self.monitors.items():
-            if monitor.data.net_type == "L2Bridge":
-                endpoint1 = self.get_node(name=monitor.creation_data[0][0])
-                endpoint2 = self.get_node(name=monitor.creation_data[1][0])
-                endpoints = [endpoint1, endpoint2]
-                fablib = self.get_fablib_manager()
-                site = fablib.get_resources().get_site(endpoint1.get_site())
-                hosts = site.get_hosts()
-                endhosts = {}
-                for endpoint in endpoints:
-                    if endpoint.get_host() is not None:
-                        continue
-                    foundhost = False
+        if (allocate_hosts):
+            allocated = {}
+            logging.info("Allocating Monitors and their connected Nodes to different worker hosts")
+            for _, monitor in self.monitors.items():
+                logging.info(f"Allocating Monitor for network {monitor.data.net_name}")
+                if monitor.data.net_type == "L2Bridge":
+                    endpoint1 = self.get_node(name=monitor.creation_data[0][0])
+                    endpoint2 = self.get_node(name=monitor.creation_data[1][0])
+                    endpoints = [endpoint1, endpoint2]
+                    fablib = self.get_fablib_manager()
+                    site = fablib.get_resources().get_site(endpoint1.get_site())
+                    hosts = site.get_hosts()
+                    endhosts = {}
+                    for endpoint in endpoints:
+                        if endpoint.get_host() is not None:
+                            continue
+                        foundhost = False
+                        for host in hosts.values():
+                            allocated_comps = allocated.setdefault(host.get_name(), {})
+                            if fablib._FablibManager__can_allocate_node_in_host(
+                                host=host, node=endpoint, allocated=allocated_comps, site=site)[0]:
+                                endpoint.set_host(host_name=host.get_name())
+                                endhosts.setdefault(host.get_name(), True)
+                                foundhost = True
+                                logging.info(f'Node {endpoint.get_name()} assigned to {host.get_name()}')
+                                break
+                        if not foundhost:
+                            raise Exception(f"Could not place node {endpoint.get_name()}")
                     for host in hosts.values():
+                        if host.get_name() in endhosts:
+                            continue
                         allocated_comps = allocated.setdefault(host.get_name(), {})
                         if fablib._FablibManager__can_allocate_node_in_host(
-                            host=host, node=endpoint, allocated=allocated_comps, site=site)[0]:
-                            endpoint.set_host(host_name=host.get_name())
-                            endhosts.setdefault(host.get_name(), True)
-                            foundhost = True
-                            logging.info(f'Node {endpoint.get_name()} assigned to {host.get_name()}')
+                            host=host, node=monitor, allocated=allocated_comps, site=site)[0]:
+                            monitor.set_host(host_name=host.get_name())
+                            logging.info(f'Node {monitor.get_name()} assigned to {host.get_name()}')
                             break
-                    if not foundhost:
-                        raise Exception(f"Could not place node {endpoint.get_name()}")
-                for host in hosts.values():
-                    if host.get_name() in endhosts:
-                        continue
-                    allocated_comps = allocated.setdefault(host.get_name(), {})
-                    if fablib._FablibManager__can_allocate_node_in_host(
-                        host=host, node=monitor, allocated=allocated_comps, site=site)[0]:
-                        monitor.set_host(host_name=host.get_name())
-                        logging.info(f'Node {monitor.get_name()} assigned to {host.get_name()}')
-                        break
-                if monitor.get_host() is None:
-                    raise Exception(f"Could not place monitor for network {monitor.data.net_name}")
+                    if monitor.get_host() is None:
+                        raise Exception(f"Could not place monitor for network {monitor.data.net_name}")
         
         return super().submit(wait=wait, wait_timeout=wait_timeout, wait_interval=wait_interval, progress=progress, wait_jupyter=wait_jupyter, post_boot_config=post_boot_config, wait_ssh=wait_ssh,
                        extra_ssh_keys=extra_ssh_keys, lease_start_time=lease_start_time, lease_end_time=lease_end_time, lease_in_hours=lease_in_hours, validate=validate)
@@ -695,9 +712,18 @@ class CrinkleSlice(Slice):
         self.analyzer = self.get_node(name=self.analyzer_name)
         site = self.analyzer.get_site()
         self.analyzer_cnet = self.get_l3network(name=f"{self.prefix}_net_{site}")
+        self.analyzer_iface = self.analyzer.get_interface(network_name=self.analyzer_cnet.get_name())
         self.cnets[site]=self.analyzer_cnet
         jobs: list[futures.Future] = []
         counter = 0
+        spade_commands = (f'mkdir {REMOTEWORKDIR};'
+                          'git clone https://github.com/ashish-gehani/SPADE.git;'
+                          'sudo add-apt-repository -y ppa:openjdk-r/ppa; sudo apt-get update; sudo apt-get install -y openjdk-11-jdk;'
+                          'sudo apt-get install -y auditd bison clang cmake curl flex fuse git ifupdown libaudit-dev libfuse-dev linux-headers-`uname -r` lsof pkg-config unzip uthash-dev wget;'
+                          'sudo apt-get install -y graphviz python3-scapy;'
+                          'cd SPADE; ./configure; make;'
+                        )
+        spade_job = self.analyzer.execute_thread(spade_commands)
         for key, monitor in self.monitors.items():
             logging.info(f"Refreshing monitor for net {key} after slice creation, count {counter}")
             refreshed_monitor = self.get_monitor(monitor.get_name())
@@ -712,13 +738,19 @@ class CrinkleSlice(Slice):
             if self.cnets[mon_site] is None or not self.cnets[mon_site].is_instantiated():
                 self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_net_{mon_site}")
             refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_net_{mon_site}")
+            dev_name = refreshed_monitor.data.cnet_iface.get_device_name()
+            refreshed_monitor.data.port_sequence += f"-i {refreshed_monitor.data.port_nums}@{dev_name} "
+            refreshed_monitor.data.port_nums += 1
             for data in monitor.creation_data:
                 logging.info(f"Initializing monitor after slice creation with data: {data}")
                 iface: Interface = self.get_node(name=data[MonNetData.NODENAME]).get_interface(name=data[MonNetData.IFACENAME])
                 mon_iface = refreshed_monitor.get_component(name=data[MonNetData.MIFACENAME]).get_interfaces()[0]
-                refreshed_monitor.data.iface_mappings[iface] = (data[MonNetData.NODENAME], mon_iface)
-                refreshed_monitor.data.port_sequence += f"-i{refreshed_monitor.data.port_nums}@{mon_iface.get_device_name()} "
+                dev_name = mon_iface.get_device_name()
+                refreshed_monitor.data.port_sequence += f"-i{refreshed_monitor.data.port_nums}@{dev_name} "
+                refreshed_monitor.data.iface_mappings[iface] = (
+                    data[MonNetData.NODENAME], mon_iface, data[MonNetData.ISSINK], refreshed_monitor.data.port_nums)
                 refreshed_monitor.data.port_nums += 1
+                jobs.append(refreshed_monitor.execute_thread(f'sudo ifconfig {dev_name} promisc'))
             self.monitors[key] = refreshed_monitor
             refreshed_monitor.set_monitor_data()
             counter += 1
@@ -726,9 +758,35 @@ class CrinkleSlice(Slice):
         print("Configuring Crinkle Resources")
         futures.wait(jobs)
         logging.info(f"Saving Crinkle Data")
-        self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
+        self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False, allocate_hosts=False)
         self.update()
+        logging.info(f'Waiting on Crinkle analyzer SPADE install to finish')
+        futures.wait([spade_job])
+        logging.info(f'Starting SPADE')
+        self.analyzer.execute_thread('./SPADE/bin/spade debug')
+        time.sleep(3)
+        spade_control_commands = ('add reporter DSL /home/ubuntu/spade_pipe\n'
+                                  'add analyzer CommandLine\n'
+                                  'add storage Neo4j database=/home/ubuntu/spade_database\n')
+        self.analyzer.execute(f'echo -e "{spade_control_commands}" | ./SPADE/bin/spade control', quiet=True)
+        self.analyzer.upload_file("spade-reader.py", "spade-reader.py")
+        self.analyzer.execute("sudo chmod u+x spade-reader.py")
+        self.analyzer.execute_thread("sudo python3 spade-reader.py")
         logging.info(f"Crinkle post_boot_config done")
+
+    @staticmethod
+    def mac_to_int(mac: str):
+        hexes = mac.split(':')
+        intval = 0
+        for i in range(0, 6):
+            hexval = hexes[5-i]
+            intval += (16**(2*i+1))*int(hexval[0], 16) + (16**(2*i))*int(hexval[1], 16)
+        return intval
+    
+    @staticmethod
+    def ip6_to_int(ip6: str):
+        ip6 = IPv6Address(ip6)
+        return (int(ip6)//(2**64),int(ip6)%(2**64))
         
     def start_bmv2(self, monitor: CrinkleMonitor, wait: bool=True):
         command = (f'p4c --target bmv2 --arch v1model {REMOTEWORKDIR}/base-crinkle.p4 -o {REMOTEWORKDIR};'
@@ -743,8 +801,24 @@ class CrinkleSlice(Slice):
     def configure_bridging(self, monitor: CrinkleMonitor, wait: bool=True):
         p4_commands = []
         if monitor.data.net_type in ["L2Bridge", "L2STS", "L2PTP"]:
-            p4_commands = ["table_add table_l2_bridge l2_bridge 0 => 1",
-                           "table_add table_l2_bridge l2_bridge 1 => 0"]
+            sinks = {}
+            p4_commands = ["table_add table_l2_bridge l2_bridge 1 => 2",
+                           "table_add table_l2_bridge l2_bridge 2 => 1",
+                           f'register_write macs 1 {self.mac_to_int("ff:ff:ff:ff:ff:ff")}',
+                           f'register_write macs 0 {self.mac_to_int(monitor.data.cnet_iface.get_mac())}',
+                           f'register_write ip1 0 {self.ip6_to_int(monitor.data.cnet_iface.get_ip_addr())[0]}',
+                           f'register_write ip1 1 {self.ip6_to_int(self.analyzer_iface.get_ip_addr())[0]}',
+                           f'register_write ip2 0 {self.ip6_to_int(monitor.data.cnet_iface.get_ip_addr())[1]}',
+                           f'register_write ip2 1 {self.ip6_to_int(self.analyzer_iface.get_ip_addr())[1]}',
+                           'register_write swport 0 0',
+                           'register_write trunc 0 80',
+                           f'register_write r_monitor_id 0 {monitor.data.monitor_id}',
+                           f'register_write r_monitor_id2 0 {monitor.data.monitor_id}',
+                           'mirroring_add 5 0']
+            for _, (_, _, is_sink, port_num) in monitor.data.iface_mappings.items():
+                if is_sink:
+                    p4_commands.append(f'table_add table_do_uid strip_uid {port_num} => ')
+                sinks[port_num] = is_sink
         p4_command_chain = ""
         for command in p4_commands[:-1]:
             p4_command_chain += command+'\n'
@@ -763,32 +837,137 @@ class CrinkleSlice(Slice):
             jobs.append(self.configure_bridging(monitor=monitor, wait=False))
         logging.info(f"Waiting for rules jobs to finish")
         futures.wait(jobs)
+
+    @staticmethod
+    def ip_net_like(net: str):
+        net_mask = net.split('/')
+        ret_str = ""
+        net_parts = net_mask[0].split('.')
+        ctr = 0
+        if net_parts[ctr] == "0":
+            ret_str += '%'
+        else:
+            ret_str += net_parts[ctr]
+        ctr += 1
+        while ctr < len(net_parts):
+            if net_parts[ctr] == "0":
+                ret_str += '.%'
+            else:
+                ret_str += '.'+net_parts[ctr]
+            ctr += 1
+        if ctr < 3:
+            ret_str += '.%'
+        return ret_str
+                
+
+    def get_graph(self, name: str = "graph", filterin: str = None, net_names: list[str] = [], node_names: list[str] = []):
+        spade_filter = ""
+        if filterin is not None:
+            filter_words = filterin.split(' ')
+            i = 0
+            ctr = 0
+            while i < len(filter_words) and ctr < 100:
+                do_ip = False
+                do_port = False
+                if filter_words[i] == 'and' or filter_words[i] == 'or':
+                    spade_filter += f'{filter_words[i]} '
+                    i += 1
+                if filter_words[i] == 'src':
+                    spade_filter += '\\"ip.src\\"'
+                    do_ip = True
+                    i += 1
+                elif filter_words[i] == 'dst':
+                    spade_filter += '\\"ip.dst\\"'
+                    do_ip = True
+                    i += 1
+                elif filter_words[i] == 'ip':
+                    spade_filter += '''\\"eth.type\\" == '0x800' '''
+                    do_ip = True
+                    i += 1
+                elif filter_words[i] == 'tcp':
+                    spade_filter += '''\\"ip.prot\\" == '6' '''
+                    do_port = True
+                    i += 1
+                elif filter_words[i] == 'udp':
+                    spade_filter += '''\\"ip.prot\\" == '17' '''
+                    do_port = True
+                    i += 1
+                elif filter_words[i] == 'icmp':
+                    spade_filter += '''\\"ip.prot\\" == '1' '''
+                    i += 1
+                elif filter_words[i] == 'host':
+                    spade_filter += f'''\\"ip.src\\" == '{filter_words[i+1]}' or ip.dst == '{filter_words[i+1]}' '''
+                    i += 2
+                elif filter_words[i] == 'net':
+                    spade_filter += f'''\\"ip.src\\" LIKE '{self.ip_net_like(filter_words[i+1])}' or ip.dst LIKE '{self.ip_net_like(filter_words[i+1])}' '''
+                    i += 2
+                if do_ip:
+                    if filter_words[i] == 'src':
+                        spade_filter += 'and \\"ip.src\\"'
+                        i += 1
+                    elif filter_words[i] == 'dst':
+                        spade_filter += 'and \\"ip.dst\\"'
+                        i += 1
+                    if filter_words[i] == 'host':
+                        if filter_words[i-1] == 'src' or filter_words[i-1] == 'dst':
+                            spade_filter += f''' == '{filter_words[i+1]}' '''
+                        else:
+                            spade_filter += f'''and \\"ip.src\\" == '{filter_words[i+1]}' or ip.dst == '{filter_words[i+1]}' '''
+                        i += 2
+                    elif filter_words[i] == 'net':
+                        if filter_words[i-1] == 'src' or filter_words[i-1] == 'dst':
+                            spade_filter += f'''\\" LIKE '{self.ip_net_like(filter_words[i+1])}' '''
+                        else:
+                            spade_filter += f'''and \\"ip.src\\" LIKE '{self.ip_net_like(filter_words[i+1])}' or ip.dst LIKE '{self.ip_net_like(filter_words[i+1])}' '''
+                        i += 2
+                    else:
+                        raise Exception(f"Invalid term following {filter_words[i]}: {filter_words[i+1]}")
+                if do_port:
+                    if i >= len(filter_words): break
+                    if filter_words[i] == 'port':
+                        spade_filter += f'''and \\"prot.sport\\" == '{filter_words[i+1]}' or \\"prot.dport\\" == '{filter_words[i+1]}' '''
+                        i += 2
+                    elif filter_words[i] == 'src':
+                        spade_filter += f'''and \\"prot.sport\\"  == '{filter_words[i+1]}' '''
+                        i += 2
+                    elif filter_words[i] == 'dst':
+                        spade_filter += f'''and \\"prot.dport\\"  == '{filter_words[i+1]}' '''
+                        i += 2
+                ctr += 1
+            spade_filter = spade_filter.rstrip()
+            graph_build = f'''\\$graph1 = \\$base.getLineage(\\$base.getVertex({spade_filter}), 1, 'b')\n\\$graph = \\$graph1 + \\$base.getPath(\\$graph1.getVertex(\\"type\\" == 'Process'), \\$base.getVertex(\\"type\\" == 'Agent'), 1)'''
+            self.analyzer.execute(f'echo -e "set storage Neo4j\n{graph_build}\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$graph" | ./SPADE/bin/spade query; '
+                                    f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg')
+            self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
+        else:
+            self.analyzer.execute(f'echo -e "set storage Neo4j\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$base" | ./SPADE/bin/spade query; '
+                                    f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg')
+            self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
     
     def start_monitor(self, monitor: CrinkleMonitor, wait: bool=True) -> tuple[list[futures.Future], futures.Future]:
         if monitor is None:
             raise Exception("Monitor cannot be None")
         tcpdumps: list[futures.Future] = []
-        for _, (iface_node_name, mon_iface) in monitor.data.iface_mappings.items():
+        for _, (iface_node_name, mon_iface, _, _) in monitor.data.iface_mappings.items():
             logging.info(f"Starting Monitor for network {monitor.get_name()} iface for {iface_node_name} ")
-            mon_iface_name = mon_iface.get_device_name()
-            logging.info(f"tcpdump: sudo tcpdump -vvvxxenK -i {mon_iface_name} -w {monitor.data.net_name}/{iface_node_name}.pcap")
-            tcpdumps.append(monitor.execute_thread(command=f"mkdir {monitor.data.net_name}; sudo tcpdump -vvvxxenK -i {mon_iface_name} -w {monitor.data.net_name}/{iface_node_name}.pcap"))
+            # mon_iface_name = mon_iface.get_device_name()
+            # tcpdumps.append(monitor.execute_thread(command=f"mkdir {monitor.data.net_name}; sudo tcpdump -vvvxxenK -i {mon_iface_name} -w {monitor.data.net_name}/{iface_node_name}.pcap"))
         bmv2_start = self.start_bmv2(monitor=monitor, wait=wait)
         if wait:
-            tcpdumps2: list[futures.Future] = []
-            for tcpdump in tcpdumps:
-                if not tcpdump.running():
-                    tcpdumps2.append(tcpdump)
-            logging.info(f"Waiting for {monitor.data.net_name} monitor to finish starting tcpdump processes ")
-            iteration = len(tcpdumps2)
-            count = 0
-            while len(tcpdumps2) > 0:
-                if tcpdumps2[-1].running():
-                    tcpdumps2.pop()
-                if count == iteration:
-                    logging.info(f"Waiting for {monitor.data.net_name} monitor to finish starting tcpdump processes ")
-                    count = 0
-                count += 1
+            # tcpdumps2: list[futures.Future] = []
+            # for tcpdump in tcpdumps:
+            #     if not tcpdump.running():
+            #         tcpdumps2.append(tcpdump)
+            # logging.info(f"Waiting for {monitor.data.net_name} monitor to finish starting tcpdump processes ")
+            # iteration = len(tcpdumps2)
+            # count = 0
+            # while len(tcpdumps2) > 0:
+            #     if tcpdumps2[-1].running():
+            #         tcpdumps2.pop()
+            #     if count == iteration:
+            #         logging.info(f"Waiting for {monitor.data.net_name} monitor to finish starting tcpdump processes ")
+            #         count = 0
+            #     count += 1
             logging.info(f"Adding default bmv2 rules for {monitor.data.net_name} monitor")
             self.configure_bridging(monitor=monitor, wait=True)
         return [tcpdumps, bmv2_start]
@@ -802,20 +981,20 @@ class CrinkleSlice(Slice):
             bmv2_list.append(jobs[1])
         tcpdumps: list[futures.Future] = sum(tcpdump_lists, [])
         if wait:
-            tcpdumps2: list[futures.Future] = []
-            for tcpdump in tcpdumps:
-                if not tcpdump.running():
-                    tcpdumps2.append(tcpdump)
-            logging.info(f"Waiting for monitors to finish starting tcpdump processes ")
-            iteration = len(tcpdumps2)
-            count = 0
-            while len(tcpdumps2) > 0:
-                if tcpdumps2[-1].running():
-                    tcpdumps2.pop()
-                if count == iteration:
-                    logging.info(f"Waiting for monitors to finish starting tcpdump processes ")
-                    count = 0
-                count += 1
+            # tcpdumps2: list[futures.Future] = []
+            # for tcpdump in tcpdumps:
+            #     if not tcpdump.running():
+            #         tcpdumps2.append(tcpdump)
+            # logging.info(f"Waiting for monitors to finish starting tcpdump processes ")
+            # iteration = len(tcpdumps2)
+            # count = 0
+            # while len(tcpdumps2) > 0:
+            #     if tcpdumps2[-1].running():
+            #         tcpdumps2.pop()
+            #     if count == iteration:
+            #         logging.info(f"Waiting for monitors to finish starting tcpdump processes ")
+            #         count = 0
+            #     count += 1
             logging.info(f"Waiting for monitors to finish starting bmv2 processes ")
             futures.wait(bmv2_list)
             self.configure_all_bridging()
@@ -824,7 +1003,7 @@ class CrinkleSlice(Slice):
     def stop_monitor(self, monitor: CrinkleMonitor):
         if monitor is None:
             raise Exception("mon_net cannot be None")
-        monitor.execute("sudo killall tcpdump; sudo killall simple_switch")
+        monitor.execute("sudo killall simple_switch")
 
     def stop_all_monitors(self):
         for monitor in self.monitors.values():
