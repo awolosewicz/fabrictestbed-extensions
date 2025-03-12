@@ -31,6 +31,7 @@ PCAPDIR = "/home/ubuntu/pcaps/"
 LOCALP4DIR = "."
 REMOTEWORKDIR = ".crinkle"
 CREASEDIR = "fabrictestbed-extensions/fabrictestbed_extensions/fablib/crease"
+SWITCHPREFIX = "~/bmv2-remote-attestation/targets/simple_switch/"
 
 TCPDUMP_IMAGES = ["default_ubuntu_20",
                   "default_ubuntu_22",
@@ -138,10 +139,10 @@ class CrinkleAnalyzer(Node):
     
 class CrinkleMonitor(Node):
 
-    default_image = "default_ubuntu_22"
+    default_image = "attestable_bmv2_v2_ubuntu_20"
     default_cores = 2
     default_ram = 2
-    default_disk = 15
+    default_disk = 25
 
     class MonitorData():
         def __init__(
@@ -561,7 +562,7 @@ class CrinkleSlice(Slice):
         
         monitor.set_capacities(cores=CrinkleMonitor.default_cores, ram=CrinkleMonitor.default_ram, disk=CrinkleMonitor.default_disk)
 
-        monitor.set_image(CrinkleAnalyzer.default_image)
+        monitor.set_image(CrinkleMonitor.default_image)
 
         self.nodes = None
         self.interfaces = {}
@@ -800,6 +801,7 @@ class CrinkleSlice(Slice):
                     endhosts = {}
                     for endpoint in endpoints:
                         if endpoint.get_host() is not None:
+                            endhosts.setdefault(endpoint.get_host(), True)
                             continue
                         foundhost = False
                         for host in hosts.values():
@@ -858,18 +860,19 @@ class CrinkleSlice(Slice):
                           'cd SPADE; ./configure; make;'
                         )
         spade_job = self.analyzer.execute_thread(spade_commands)
-        self.monitor_string = ""
+        self.monitor_string = f"{self.analyzer_iface.get_device_name()} "
         for key, monitor in self.monitors.items():
             logging.info(f"Refreshing monitor for net {key} after slice creation, count {counter}")
             refreshed_monitor = self.get_monitor(monitor.get_name())
             mon_site = refreshed_monitor.get_site()
             refreshed_monitor.execute(f"mkdir {REMOTEWORKDIR}")
             jobs.append(refreshed_monitor.upload_file_thread(f"{CREASEDIR}/base-crinkle.p4", f"{REMOTEWORKDIR}/base-crinkle.p4"))
-            jobs.append(refreshed_monitor.execute_thread('source /etc/lsb-release; '
-                                                         'echo "deb http://download.opensuse.org/repositories/home:/p4lang/xUbuntu_${DISTRIB_RELEASE}/ /" | sudo tee /etc/apt/sources.list.d/home:p4lang.list; '
-                                                         'curl -fsSL https://download.opensuse.org/repositories/home:p4lang/xUbuntu_${DISTRIB_RELEASE}/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/home_p4lang.gpg > /dev/null; '
-                                                         'sudo apt-get update; '
-                                                         'sudo apt install -y p4lang-p4c python3-scapy'))
+            # jobs.append(refreshed_monitor.execute_thread('source /etc/lsb-release; '
+            #                                              'echo "deb http://download.opensuse.org/repositories/home:/p4lang/xUbuntu_${DISTRIB_RELEASE}/ /" | sudo tee /etc/apt/sources.list.d/home:p4lang.list; '
+            #                                              'curl -fsSL https://download.opensuse.org/repositories/home:p4lang/xUbuntu_${DISTRIB_RELEASE}/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/home_p4lang.gpg > /dev/null; '
+            #                                              'sudo apt-get update; '
+            #                                              'sudo apt install -y p4lang-p4c python3-scapy'))
+            jobs.append(refreshed_monitor.execute_thread('sudo apt update; sudo apt install -y python3-scapy'))
             if self.cnets[mon_site] is None or not self.cnets[mon_site].is_instantiated():
                 self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_net_{mon_site}")
             refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_net_{mon_site}")
@@ -899,7 +902,7 @@ class CrinkleSlice(Slice):
         self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False, allocate_hosts=False)
         self.update()
         logging.info(f'Waiting on Crinkle analyzer SPADE install to finish')
-        futures.wait([spade_job])
+        spade_job.join()
         logging.info(f'Starting SPADE')
         self.analyzer.execute_thread('./SPADE/bin/spade debug')
         time.sleep(3)
@@ -1188,11 +1191,11 @@ class CrinkleSlice(Slice):
                                 f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg', quiet=quiet)
         self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
 
-    def reset_analyzer(self):
+    def reset_analyzer(self, quiet: bool = True):
         """
         Reset the analyzer, wiping the database.
         """
-        self.analyzer.execute(f'''sudo killall python3; echo -e "remove storage Neo4j\n" | ./SPADE/bin/spade control; rm -rf spade_database/; echo -e "add storage Neo4j database=/home/ubuntu/spade_database\n" | ./SPADE/bin/spade control''')
+        self.analyzer.execute(f'''sudo killall python3; echo -e "remove storage Neo4j\n" | ./SPADE/bin/spade control; rm -rf spade_database/; echo -e "add storage Neo4j database=/home/ubuntu/spade_database\n" | ./SPADE/bin/spade control''', quiet=quiet)
         self.analyzer.execute_thread(f'sudo ./spade_reader.py {self.monitor_string}')
     
     def start_monitor(self, monitor: CrinkleMonitor, wait: bool=True) -> tuple[list[futures.Future], futures.Future]:

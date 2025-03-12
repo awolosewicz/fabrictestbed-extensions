@@ -142,10 +142,11 @@ if __name__ == "__main__":
     optpairs, args = getopt.getopt(sys.argv[1:], "m")
     # -m id_0@{iface1}_1@{iface2}
     monitors = {}
+    local_iface = args[0]
     with open("spade_pipe", 'a') as pipe:
-        idx = 0
+        idx = 1
         id = -1
-        while idx < len(args):
+        while idx < len(args[1:]):
             iface_parts = args[idx].split('@', 1)
             if len(iface_parts) == 1:
                 id = args[idx]
@@ -162,4 +163,4 @@ if __name__ == "__main__":
                 monitors[int(id)][int(iface_id)] = iface_parts[1]
             idx += 1
     print(monitors)
-    sniff(prn=lambda x: analyze_packet(x, monitors), iface="enp7s0")
+    sniff(prn=lambda x: analyze_packet(x, monitors), iface=local_iface)
