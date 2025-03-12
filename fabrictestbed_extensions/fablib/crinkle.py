@@ -902,7 +902,7 @@ class CrinkleSlice(Slice):
         self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False, allocate_hosts=False)
         self.update()
         logging.info(f'Waiting on Crinkle analyzer SPADE install to finish')
-        spade_job.join()
+        futures.wait([spade_job])
         logging.info(f'Starting SPADE')
         self.analyzer.execute_thread('./SPADE/bin/spade debug')
         time.sleep(3)
