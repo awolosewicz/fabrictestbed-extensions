@@ -142,7 +142,7 @@ class CrinkleMonitor(Node):
     default_image = "attestable_bmv2_v2_ubuntu_20"
     default_cores = 2
     default_ram = 2
-    default_disk = 25
+    default_disk = 10
 
     class MonitorData():
         def __init__(
@@ -215,8 +215,11 @@ class CrinkleMonitor(Node):
             ram=CrinkleMonitor.default_ram,
             disk=CrinkleMonitor.default_disk
         )
-
-        monitor.set_image(CrinkleMonitor.default_image)
+        
+        if site == "EDUKY":
+            monitor.set_image("default_ubuntu_20")
+        else:
+            monitor.set_image(CrinkleMonitor.default_image)
 
         monitor.init_fablib_data()
 
@@ -561,8 +564,11 @@ class CrinkleSlice(Slice):
         monitor.set_user_data(user_data_working)
         
         monitor.set_capacities(cores=CrinkleMonitor.default_cores, ram=CrinkleMonitor.default_ram, disk=CrinkleMonitor.default_disk)
-
-        monitor.set_image(CrinkleMonitor.default_image)
+        
+        if site == "EDUKY":
+            monitor.set_image("default_ubuntu_20")
+        else:
+            monitor.set_image(CrinkleMonitor.default_image)
 
         self.nodes = None
         self.interfaces = {}
@@ -867,11 +873,13 @@ class CrinkleSlice(Slice):
             mon_site = refreshed_monitor.get_site()
             refreshed_monitor.execute(f"mkdir {REMOTEWORKDIR}")
             jobs.append(refreshed_monitor.upload_file_thread(f"{CREASEDIR}/base-crinkle.p4", f"{REMOTEWORKDIR}/base-crinkle.p4"))
-            # jobs.append(refreshed_monitor.execute_thread('source /etc/lsb-release; '
-            #                                              'echo "deb http://download.opensuse.org/repositories/home:/p4lang/xUbuntu_${DISTRIB_RELEASE}/ /" | sudo tee /etc/apt/sources.list.d/home:p4lang.list; '
-            #                                              'curl -fsSL https://download.opensuse.org/repositories/home:p4lang/xUbuntu_${DISTRIB_RELEASE}/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/home_p4lang.gpg > /dev/null; '
-            #                                              'sudo apt-get update; '
-            #                                              'sudo apt install -y p4lang-p4c python3-scapy'))
+            if mon_site == "EDUKY":
+                jobs.append(refreshed_monitor.execute_thread(('''sudo bash -c 'echo "2600:2701:5000:5001::c387:dfe2 download.opensuse.org" >> /etc/hosts'\n'''
+                          'echo "deb http://download.opensuse.org/repositories/home:/p4lang/xUbuntu_20.04/ /" | sudo tee /etc/apt/sources.list.d/home:p4lang.list\n'
+                          'curl -fsSL https://download.opensuse.org/repositories/home:p4lang/xUbuntu_20.04/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/home_p4lang.gpg > /dev/null\n'
+                          'sudo apt-get update\n'
+                          'sudo apt install -y p4lang-p4c net-tools python3-scapy\n'
+                          'sudo sysctl net.ipv6.conf.all.forwarding=0\n')))
             jobs.append(refreshed_monitor.execute_thread('sudo apt update; sudo apt install -y python3-scapy'))
             if self.cnets[mon_site] is None or not self.cnets[mon_site].is_instantiated():
                 self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_net_{mon_site}")
@@ -902,7 +910,7 @@ class CrinkleSlice(Slice):
         self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False, allocate_hosts=False)
         self.update()
         logging.info(f'Waiting on Crinkle analyzer SPADE install to finish')
-        spade_job.join()
+        futures.wait([spade_job])
         logging.info(f'Starting SPADE')
         self.analyzer.execute_thread('./SPADE/bin/spade debug')
         time.sleep(3)
