@@ -350,6 +350,18 @@ class CrinkleSlice(Slice):
         pcaps_dir: str = ".query_analysis_pcaps",
         name_prefix: str = "C"
     ):
+        """
+        Not intended for API use. See FablibManager.get_crinkle_slice().
+
+        Gets an existing crinkle fablib slice using a slice manager slice
+        :param fablib_manager:
+        :param sm_slice:
+        :param user_only: True indicates return own slices; False indicates return project slices
+        :type user_only: bool
+        :param name_prefix: The prefix Crinkle will append its resources with, which should not prefix any other resources
+        :type name_prefix: String
+        :return: CrinkleSlice
+        """
         logging.info("crinkleslice.get_slice()")
         slice = CrinkleSlice(fablib_manager=fablib_manager, name=sm_slice.name,
                              pcaps_dir=pcaps_dir, name_prefix=name_prefix)
@@ -410,9 +422,6 @@ class CrinkleSlice(Slice):
         ) -> CrinkleAnalyzer:
         """
         Creates a new Crinkle Analyzer node on this fablib slice.
-
-        :param name: Name of the new node
-        :type name: String
 
         :param site: (Optional) Name of the site to deploy the node
             on.  Default to a random site.
@@ -520,8 +529,18 @@ class CrinkleSlice(Slice):
         """
         Not intended for API call.
         See: CrinkleSlice.add_monitored_l2network() or CrinkleSlice.add_monitored_l3network()
-
         Creates a new Crinkle monitor node.
+
+        :param name: The name for the monitor node
+        :type name: String
+        :param site:
+        :type site: String
+        :param user_data
+        :type user_data: dict
+        :param net_name: The name of the network this will monitor
+        :type net_name: String
+        :return: a new monitor node
+        :rtype: CrinkleMonitor
         """
         if self.analyzer is None:
             raise Exception(f"Analyzer must be created before adding monitors using add_analyzer()")
@@ -570,6 +589,14 @@ class CrinkleSlice(Slice):
         return monitor
     
     def get_analyzer(self, name:str) -> CrinkleAnalyzer:
+        """
+        Gets an analyzer from the CrinkleSlice by name.
+
+        :param name: Name of the analyzer
+        :type name: String
+        :return: the analyzer node
+        :rtype: CrinkleAnalyzer
+        """
         try:
             return CrinkleAnalyzer.get_node(self, self.get_fim_topology().nodes[name])
         except Exception as e:
@@ -577,6 +604,14 @@ class CrinkleSlice(Slice):
             raise Exception(f"Node not found: {name}")
     
     def get_monitor(self, name: str) -> CrinkleMonitor:
+        """
+        Gets a monitor from the CrinkleSlice by name.
+
+        :param name: Name of the monitor
+        :type name: String
+        :return: the monitor node
+        :rtype: CrinkleMonitor
+        """
         try:
             return CrinkleMonitor.get_node(self, self.get_fim_topology().nodes[name])
         except Exception as e:
@@ -593,6 +628,42 @@ class CrinkleSlice(Slice):
         user_data: dict = {},
         sinks: list[Interface] = []
     ) -> CrinkleMonitor:
+        """
+        Adds an L2 network similarly to Slice.add_l2network, but additionally adds a
+        CrinkleMonitor node to the network which all traffic routes through. The
+        CrinkleMonitor nodes will collect traffic information and update the
+        CrinkleAnalyzer node. Additionally, certain functions will use the CrinkleMonitor
+        nodes to emit or modify packets.
+
+        
+
+        :param name: the name of the network service
+        :type name: String
+
+        :param interfaces: a list of interfaces to build the network
+            with
+        :type interfaces: List[Interface]
+
+        :param type: optional L2 network type "L2Bridge", "L2STS", or
+            "L2PTP"
+        :type type: String
+
+        :param subnet:
+        :type subnet: ipaddress
+
+        :param gateway:
+        :type gateway: ipaddress
+
+        :param user_data
+        :type user_data: dict
+
+        :param sinks: A set of interfaces which should have any Crinkle packet trailers
+            stripped before entering.
+        :type sinks: list[Interface]
+
+        :return: a new CrinkleMonitor
+        :rtype: CrinkleMonitor
+        """
         # Directly from NetworkService.__calculate_l2_nstype
         from fabrictestbed_extensions.fablib.facility_port import FacilityPort
 
@@ -661,6 +732,54 @@ class CrinkleSlice(Slice):
         validate: bool = False,
         allocate_hosts: bool = True
     ) -> str:
+        """
+        Similarly to Slice.submit(), submits a slice request to FABRIC.
+        This version does extra work to support Crinkle resources, such as
+        ensuring monitors are on different workers from the nodes they monitor.
+
+
+        :param wait: indicator for whether to wait for the slice's resources to be active
+        :type wait: bool
+
+        :param wait_timeout: how many seconds to wait on the slice resources
+        :type wait_timeout: int
+
+        :param wait_interval: how often to check on the slice resources
+        :type wait_interval: int
+
+        :param progress: indicator for whether to show progress while waiting
+        :type progress: bool
+
+        :param wait_jupyter: Special wait for jupyter notebooks.
+        :type wait_jupyter: str
+
+        :param post_boot_config:
+        :type post_boot_config: bool
+
+        :param wait_ssh:
+        :type wait_ssh: bool
+
+        :param extra_ssh_keys: Optional list of additional SSH public keys to be installed in the slivers of this slice
+        :type extra_ssh_keys: List[str]
+
+        :param lease_start_time: Optional lease start time in UTC format: %Y-%m-%d %H:%M:%S %z.
+                           Specifies the beginning of the time range to search for available resources valid for `lease_in_hours`.
+        :type lease_start_time: datetime
+
+        :param lease_end_time: Optional lease end time in UTC format: %Y-%m-%d %H:%M:%S %z.
+                         Specifies the end of the time range to search for available resources valid for `lease_in_hours`.
+        :type lease_end_time: datetime
+
+        :param lease_in_hours: Optional lease duration in hours. By default, the slice remains active for 24 hours (1 day).
+                               This parameter is only applicable during creation.
+        :type lease_in_hours: int
+
+        :param validate: Validate node can be allocated w.r.t available resources
+        :type validate: bool
+
+        :return: slice_id
+        :rtype: String
+        """
         logging.info("Crinkle submit()")
         if self.analyzer is None:
             raise Exception(f"Analyzer must be added before Crinkle slice submission using add_analyzer()")
@@ -709,6 +828,18 @@ class CrinkleSlice(Slice):
                        extra_ssh_keys=extra_ssh_keys, lease_start_time=lease_start_time, lease_end_time=lease_end_time, lease_in_hours=lease_in_hours, validate=validate)
     
     def post_boot_config(self):
+        """
+        Runs post_boot_config identically to Slice.post_boot_config before running
+        Crinkle specific functions. These are to:
+            - Install the SPADE provenance analyzer to the analyzer node
+            - Install other needed libraries and software to the analyzer and monitors
+            - Update the slice local variables with new references to FABRIC resources
+            - Create the monitor.data entries and save them to FABRIC
+            - Start the SPADE instance and analyzer listening service
+
+        Only use this method after a non-blocking submit call and only call it
+        once.
+        """
         super().post_boot_config()
         logging.info(f"Crinkle post_boot_config")
         self.analyzer = self.get_node(name=self.analyzer_name)
@@ -782,6 +913,14 @@ class CrinkleSlice(Slice):
 
     @staticmethod
     def mac_to_int(mac: str):
+        """
+        Translates a MAC address to an int
+
+        :param mac: MAC address
+        :type mac: String
+        :return: The integer value of the MAC address
+        :rtype: int
+        """
         hexes = mac.split(':')
         intval = 0
         for i in range(0, 6):
@@ -791,10 +930,28 @@ class CrinkleSlice(Slice):
     
     @staticmethod
     def ip6_to_int(ip6: str):
+        """
+        Translates an IPv6 address to an int
+
+        :param mac: IPv6 address
+        :type mac: String
+        :return: A tuple of the integer values of the front and back halves
+        :rtype: tuple[int, int]
+        """
         ip6 = IPv6Address(ip6)
         return (int(ip6)//(2**64),int(ip6)%(2**64))
         
     def start_bmv2(self, monitor: CrinkleMonitor, wait: bool=True):
+        """
+        Initialize the BMv2 process on a monitor.
+
+        :param monitor: The monitor
+        :type monitor: CrinkleMonitor
+        :param wait: Whether this call should block or not, default True
+        :type wait: bool
+        :return: The future of a non-blocking call, or None
+        :rtype: concurrent.futures.Future
+        """
         command = (f'p4c --target bmv2 --arch v1model {REMOTEWORKDIR}/base-crinkle.p4 -o {REMOTEWORKDIR};'
                    f'nohup bash -c "sudo simple_switch {monitor.data.port_sequence}{REMOTEWORKDIR}/base-crinkle.json --log-file ~/monitor.log -- --enable-swap; echo " 1> /dev/null 2> /dev/null &')
         job = None
@@ -804,7 +961,21 @@ class CrinkleSlice(Slice):
             job = monitor.execute_thread(command=command)
         return job
     
-    def probe(self, monitor: CrinkleMonitor, scapy: str, iface_name: str, name: str = "probe"):
+    def probe(self, scapy: str, iface_name: str, name: str = "probe"):
+        """
+        Send a packet, formed from the given scapy definition and appended with a unique id,
+        into the targeted interface then download the graph of its traversal across
+        the network.
+
+        :param scapy: Scapy definition the packet will be crafted from, as a string
+        :type scapy: String
+        :param iface_name: The name of the interface to target with the packet
+        :type iface_name: String
+        :param name: The name of the downloaded graph
+        :type name: String
+        """
+        net_name = self.get_interface(name=iface_name).get_network().get_name()
+        monitor = self.monitors[net_name]
         port = monitor.data.iface_mappings[iface_name][3]
         dev_name = monitor.data.iface_mappings[iface_name][1].get_device_name()
         if port == 1:
@@ -819,6 +990,16 @@ class CrinkleSlice(Slice):
         self.get_graph(name=name, pkt_id=uid)
     
     def configure_bridging(self, monitor: CrinkleMonitor, wait: bool=True):
+        """
+        Configures the monitor bridging and other functions.
+
+        :param monitor: The monitor to configure
+        :type monitor: CrinkleMonitor
+        :param wait: Whether this call is blocking, default True
+        :type wait: bool
+        :return: The future of a non-blocking call, or None
+        :rtype: concurrent.futures.Future
+        """
         p4_commands = []
         if monitor.data.net_type in ["L2Bridge", "L2STS", "L2PTP"]:
             sinks = {}
@@ -851,6 +1032,9 @@ class CrinkleSlice(Slice):
         return job
     
     def configure_all_bridging(self):
+        """
+        Call configure_bridging for every monitor in the slice.
+        """
         logging.info(f"Adding default bmv2 rules for monitors")
         jobs = []
         for monitor in self.monitors.values():
@@ -860,6 +1044,15 @@ class CrinkleSlice(Slice):
 
     @staticmethod
     def ip_net_like(net: str):
+        """
+        Not intended for API use. Transforms IPv4 subnets into LIKE terms for SPADE.
+
+        :param net: The IPv4 subnet, either of the form X.0.0.0/8, X.Y.0.0/16, X.Y.Z.0/24,
+            or X, X.Y, X.Y.Z
+        :type net: String
+        :return: the LIKE term for SPADE
+        :rtype: String
+        """
         net_mask = net.split('/')
         ret_str = ""
         net_parts = net_mask[0].split('.')
@@ -881,6 +1074,23 @@ class CrinkleSlice(Slice):
                 
 
     def get_graph(self, name: str = "graph", filterin: str = None, tstart: int = -1, tend: int = -1, pkt_id: int = -1, quiet=True):
+        """
+        Produce and download a graph of the data stored in the analyzer's SPADE database,
+        filtered using the given arguments.
+
+        :param name: The name of the downloaded graph, default "graph".
+        :type name: String
+        :param filterin: A tcpdump filter (currently supports ip, tcp, udp, icmp) to filter flows in the graph on
+        :type filterin: String
+        :param tstart: A time filter, such that the returned graph is for all packets with time >= tstart. Default off
+        :type tstart: int
+        :param tend: A time filter, such that the returned graph is for all packets with time <= tend. Default off
+        :type tend: int
+        :param pkt_id: Only return packets matching the id
+        :type pkt_id: int
+        :param quiet: If True, suppresses SPADE query output and just returns the graph
+        :type quiet: bool
+        """
         spade_filter = ""
         if filterin is not None:
             filter_words = filterin.split(' ')
@@ -976,70 +1186,50 @@ class CrinkleSlice(Slice):
         self.analyzer.execute(f'echo -e "set storage Neo4j\n{graph_build}\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$graph3" | ./SPADE/bin/spade query; '
                                 f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg', quiet=quiet)
         self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
-        # else:
-        #     self.analyzer.execute(f'echo -e "set storage Neo4j\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$base" | ./SPADE/bin/spade query; '
-        #                             f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg')
-        #     self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
 
     def reset_analyzer(self):
+        """
+        Reset the analyzer, wiping the database.
+        """
         self.analyzer.execute(f'''sudo killall python3; echo -e "remove storage Neo4j\n" | ./SPADE/bin/spade control; rm -rf spade_database/; echo -e "add storage Neo4j database=/home/ubuntu/spade_database\n" | ./SPADE/bin/spade control''')
         self.analyzer.execute_thread(f'sudo ./spade_reader.py {self.monitor_string}')
     
     def start_monitor(self, monitor: CrinkleMonitor, wait: bool=True) -> tuple[list[futures.Future], futures.Future]:
+        """
+        Start BMv2 on a monitor and, if blocking, configure it.
+
+        :param monitor: The monitor node to target
+        :type monitor: CrinkleMonitor
+        :param wait: Whether this call is blocking, default True
+        :type wait: bool
+        :return: The future of a non-blocking call, or None
+        :rtype: concurrent.futures.Future
+        """
         if monitor is None:
             raise Exception("Monitor cannot be None")
-        tcpdumps: list[futures.Future] = []
-        for _, (iface_node_name, mon_iface, _, _) in monitor.data.iface_mappings.items():
-            logging.info(f"Starting Monitor for network {monitor.get_name()} iface for {iface_node_name} ")
-            # mon_iface_name = mon_iface.get_device_name()
-            # tcpdumps.append(monitor.execute_thread(command=f"mkdir {monitor.data.net_name}; sudo tcpdump -vvvxxenK -i {mon_iface_name} -w {monitor.data.net_name}/{iface_node_name}.pcap"))
         bmv2_start = self.start_bmv2(monitor=monitor, wait=wait)
         if wait:
-            # tcpdumps2: list[futures.Future] = []
-            # for tcpdump in tcpdumps:
-            #     if not tcpdump.running():
-            #         tcpdumps2.append(tcpdump)
-            # logging.info(f"Waiting for {monitor.data.net_name} monitor to finish starting tcpdump processes ")
-            # iteration = len(tcpdumps2)
-            # count = 0
-            # while len(tcpdumps2) > 0:
-            #     if tcpdumps2[-1].running():
-            #         tcpdumps2.pop()
-            #     if count == iteration:
-            #         logging.info(f"Waiting for {monitor.data.net_name} monitor to finish starting tcpdump processes ")
-            #         count = 0
-            #     count += 1
             logging.info(f"Adding default bmv2 rules for {monitor.data.net_name} monitor")
             self.configure_bridging(monitor=monitor, wait=True)
-        return [tcpdumps, bmv2_start]
+        return bmv2_start
         
     def start_all_monitors(self, wait: bool=True):
-        tcpdump_lists: list[list[futures.Future]] = []
+        """
+        Start BMv2 on all monitors and, if blocking, configure them.
+
+        :param wait: Whether this call is blocking, default True
+        :type wait: bool
+        :return: The future of a non-blocking call, or None
+        :rtype: concurrent.futures.Future
+        """
         bmv2_list: list[futures.Future] = []
         for monitor in self.monitors.values():
-            jobs = self.start_monitor(monitor=monitor, wait=False)
-            tcpdump_lists.append(jobs[0])
-            bmv2_list.append(jobs[1])
-        tcpdumps: list[futures.Future] = sum(tcpdump_lists, [])
+            bmv2_list.append(self.start_monitor(monitor=monitor, wait=False))
         if wait:
-            # tcpdumps2: list[futures.Future] = []
-            # for tcpdump in tcpdumps:
-            #     if not tcpdump.running():
-            #         tcpdumps2.append(tcpdump)
-            # logging.info(f"Waiting for monitors to finish starting tcpdump processes ")
-            # iteration = len(tcpdumps2)
-            # count = 0
-            # while len(tcpdumps2) > 0:
-            #     if tcpdumps2[-1].running():
-            #         tcpdumps2.pop()
-            #     if count == iteration:
-            #         logging.info(f"Waiting for monitors to finish starting tcpdump processes ")
-            #         count = 0
-            #     count += 1
             logging.info(f"Waiting for monitors to finish starting bmv2 processes ")
             futures.wait(bmv2_list)
             self.configure_all_bridging()
-        return tcpdumps
+        return bmv2_list
 
     def stop_monitor(self, monitor: CrinkleMonitor):
         if monitor is None:
