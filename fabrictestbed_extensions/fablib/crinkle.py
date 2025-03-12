@@ -150,7 +150,7 @@ class CrinkleMonitor(Node):
             net_name: str = None,
             net_type: str = None,
             cnet_iface: Interface = None,
-            iface_mappings: dict[Interface, tuple[str, Interface, bool, int]] = {},
+            iface_mappings: dict[str, tuple[str, Interface, bool, int]] = {},
             monitor_id: int = None
         ):
             self.port_nums = port_nums
@@ -249,7 +249,7 @@ class CrinkleMonitor(Node):
             #logging.info(f"Retrieved monitor iface mappings as: {data_iface_mappings}")
             iface_mappings = {}
             for node_iface, (node_name, monitor_iface, is_sink, port_num) in data["iface_mappings"].items():
-                iface_mappings[self.slice.get_interface(name=node_iface)] = (
+                iface_mappings[node_iface] = (
                     node_name, self.slice.get_interface(name=monitor_iface), is_sink, port_num
                 )
             self.data = self.MonitorData(
@@ -274,7 +274,7 @@ class CrinkleMonitor(Node):
         user_data = self.get_user_data()
         iface_mappings = {}
         for node_iface, (node_name, monitor_iface, is_sink, port_num) in self.data.iface_mappings.items():
-            iface_mappings[node_iface.get_name()] = (
+            iface_mappings[node_iface] = (
                 node_name, monitor_iface.get_name(), is_sink, port_num
             )
         data_dict = {
@@ -312,6 +312,8 @@ class CrinkleSlice(Slice):
         self.pcaps_dir = pcaps_dir
         self.prefix = name_prefix
         self.monitor_count = 0
+        self.monitor_string = None
+        self.probe_id = 0
 
     @staticmethod
     def new_slice(
@@ -724,6 +726,7 @@ class CrinkleSlice(Slice):
                           'cd SPADE; ./configure; make;'
                         )
         spade_job = self.analyzer.execute_thread(spade_commands)
+        self.monitor_string = ""
         for key, monitor in self.monitors.items():
             logging.info(f"Refreshing monitor for net {key} after slice creation, count {counter}")
             refreshed_monitor = self.get_monitor(monitor.get_name())
@@ -734,26 +737,29 @@ class CrinkleSlice(Slice):
                                                          'echo "deb http://download.opensuse.org/repositories/home:/p4lang/xUbuntu_${DISTRIB_RELEASE}/ /" | sudo tee /etc/apt/sources.list.d/home:p4lang.list; '
                                                          'curl -fsSL https://download.opensuse.org/repositories/home:p4lang/xUbuntu_${DISTRIB_RELEASE}/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/home_p4lang.gpg > /dev/null; '
                                                          'sudo apt-get update; '
-                                                         'sudo apt install -y p4lang-p4c'))
+                                                         'sudo apt install -y p4lang-p4c python3-scapy'))
             if self.cnets[mon_site] is None or not self.cnets[mon_site].is_instantiated():
                 self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_net_{mon_site}")
             refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_net_{mon_site}")
             dev_name = refreshed_monitor.data.cnet_iface.get_device_name()
             refreshed_monitor.data.port_sequence += f"-i {refreshed_monitor.data.port_nums}@{dev_name} "
             refreshed_monitor.data.port_nums += 1
+            self.monitor_string += f'{refreshed_monitor.data.monitor_id} '
             for data in monitor.creation_data:
                 logging.info(f"Initializing monitor after slice creation with data: {data}")
-                iface: Interface = self.get_node(name=data[MonNetData.NODENAME]).get_interface(name=data[MonNetData.IFACENAME])
                 mon_iface = refreshed_monitor.get_component(name=data[MonNetData.MIFACENAME]).get_interfaces()[0]
                 dev_name = mon_iface.get_device_name()
                 refreshed_monitor.data.port_sequence += f"-i{refreshed_monitor.data.port_nums}@{dev_name} "
-                refreshed_monitor.data.iface_mappings[iface] = (
+                refreshed_monitor.data.iface_mappings[data[MonNetData.IFACENAME]] = (
                     data[MonNetData.NODENAME], mon_iface, data[MonNetData.ISSINK], refreshed_monitor.data.port_nums)
+                self.monitor_string += f'{refreshed_monitor.data.port_nums}@{data[MonNetData.IFACENAME]} '
                 refreshed_monitor.data.port_nums += 1
                 jobs.append(refreshed_monitor.execute_thread(f'sudo ifconfig {dev_name} promisc'))
+            self.monitor_string += ' '
             self.monitors[key] = refreshed_monitor
             refreshed_monitor.set_monitor_data()
             counter += 1
+        self.monitor_string = self.monitor_string.rstrip()
         logging.info(f"Crinkle post_boot_config waiting on jobs to finish")
         print("Configuring Crinkle Resources")
         futures.wait(jobs)
@@ -769,9 +775,9 @@ class CrinkleSlice(Slice):
                                   'add analyzer CommandLine\n'
                                   'add storage Neo4j database=/home/ubuntu/spade_database\n')
         self.analyzer.execute(f'echo -e "{spade_control_commands}" | ./SPADE/bin/spade control', quiet=True)
-        self.analyzer.upload_file("spade-reader.py", "spade-reader.py")
-        self.analyzer.execute("sudo chmod u+x spade-reader.py")
-        self.analyzer.execute_thread("sudo python3 spade-reader.py")
+        self.analyzer.upload_file("spade_reader.py", "spade_reader.py")
+        self.analyzer.execute("sudo chmod u+x spade_reader.py")
+        self.analyzer.execute_thread(f"sudo ./spade_reader.py {self.monitor_string}")
         logging.info(f"Crinkle post_boot_config done")
 
     @staticmethod
@@ -797,6 +803,20 @@ class CrinkleSlice(Slice):
         else:
             job = monitor.execute_thread(command=command)
         return job
+    
+    def probe(self, monitor: CrinkleMonitor, scapy: str, iface_name: str, name: str = "probe"):
+        port = monitor.data.iface_mappings[iface_name][3]
+        dev_name = monitor.data.iface_mappings[iface_name][1].get_device_name()
+        if port == 1:
+            port = 2
+        else:
+            port = 1
+        scapy = scapy.replace('"', '\\"')
+        uid = (7950 << 112) + (monitor.data.monitor_id << 100) + (port << 96) + self.probe_id
+        self.probe_id += 1
+        new_scapy = f'Raw({scapy})/Raw(int({uid}).to_bytes(16, \\"big\\"))'
+        monitor.execute(f'''echo -e "from scapy.all import *\npkt={new_scapy}\nsendp(pkt, iface='{dev_name}')\n" | sudo python3''')
+        self.get_graph(name=name, pkt_id=uid)
     
     def configure_bridging(self, monitor: CrinkleMonitor, wait: bool=True):
         p4_commands = []
@@ -860,7 +880,7 @@ class CrinkleSlice(Slice):
         return ret_str
                 
 
-    def get_graph(self, name: str = "graph", filterin: str = None, net_names: list[str] = [], node_names: list[str] = []):
+    def get_graph(self, name: str = "graph", filterin: str = None, tstart: int = -1, tend: int = -1, pkt_id: int = -1, quiet=True):
         spade_filter = ""
         if filterin is not None:
             filter_words = filterin.split(' ')
@@ -882,7 +902,8 @@ class CrinkleSlice(Slice):
                     i += 1
                 elif filter_words[i] == 'ip':
                     spade_filter += '''\\"eth.type\\" == '0x800' '''
-                    do_ip = True
+                    if i + 1 < len(filter_words):
+                        do_ip = True
                     i += 1
                 elif filter_words[i] == 'tcp':
                     spade_filter += '''\\"ip.prot\\" == '6' '''
@@ -934,15 +955,35 @@ class CrinkleSlice(Slice):
                         spade_filter += f'''and \\"prot.dport\\"  == '{filter_words[i+1]}' '''
                         i += 2
                 ctr += 1
-            spade_filter = spade_filter.rstrip()
-            graph_build = f'''\\$graph1 = \\$base.getLineage(\\$base.getVertex({spade_filter}), 1, 'b')\n\\$graph = \\$graph1 + \\$base.getPath(\\$graph1.getVertex(\\"type\\" == 'Process'), \\$base.getVertex(\\"type\\" == 'Agent'), 1)'''
-            self.analyzer.execute(f'echo -e "set storage Neo4j\n{graph_build}\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$graph" | ./SPADE/bin/spade query; '
-                                    f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg')
-            self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
+        spade_filter = spade_filter.rstrip()
+        time_filter = ""
+        if tstart != -1 and tend != -1:
+            time_filter += f'''"time" >= {tstart} and "time" <= {tend}'''
+        elif tstart != -1:
+            time_filter += f'''"time" >= {tstart}'''
+        elif tend != -1:
+            time_filter += f'''"time" <= {tstart}'''
+        graph_build = ""
+        if pkt_id != -1:
+            graph_build += f'''\\$graph0 = \\$base.getPath(\\$base.getEdge(\\"pkt_id\\" == '{pkt_id}').limit(1000).getEdgeEndpoints(), \\$base.getVertex(\\"type\\" == 'Agent'), 1) + \\$base.getEdge(\\"pkt_id\\" == '{pkt_id}').limit(1000) + \\$base.getEdge(\\"pkt_id\\" == '{pkt_id}').limit(1000).getEdgeEndpoints()\n'''
         else:
-            self.analyzer.execute(f'echo -e "set storage Neo4j\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$base" | ./SPADE/bin/spade query; '
-                                    f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg')
-            self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
+            graph_build += '''\\$graph0 = \\$base\n'''
+        if time_filter != "":
+            graph_build += f'''\\$graph1 = \\$graph0.getLineage(\\$base.getEdge({time_filter}).limit(1000), 1, 'b')\n'''
+        else:
+            graph_build += '''\\$graph1 = \\$graph0\n'''
+        graph_build += f'''\\$graph2 = \\$graph1.getLineage(\\$graph1.getVertex({spade_filter}), 1, 'b')\n\\$graph3 = \\$graph2 + \\$base.getPath(\\$graph2.getVertex(\\"type\\" == 'Process'), \\$base.getVertex(\\"type\\" == 'Agent'), 1)'''
+        self.analyzer.execute(f'echo -e "set storage Neo4j\n{graph_build}\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$graph3" | ./SPADE/bin/spade query; '
+                                f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg', quiet=quiet)
+        self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
+        # else:
+        #     self.analyzer.execute(f'echo -e "set storage Neo4j\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$base" | ./SPADE/bin/spade query; '
+        #                             f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg')
+        #     self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
+
+    def reset_analyzer(self):
+        self.analyzer.execute(f'''sudo killall python3; echo -e "remove storage Neo4j\n" | ./SPADE/bin/spade control; rm -rf spade_database/; echo -e "add storage Neo4j database=/home/ubuntu/spade_database\n" | ./SPADE/bin/spade control''')
+        self.analyzer.execute_thread(f'sudo ./spade_reader.py {self.monitor_string}')
     
     def start_monitor(self, monitor: CrinkleMonitor, wait: bool=True) -> tuple[list[futures.Future], futures.Future]:
         if monitor is None:
