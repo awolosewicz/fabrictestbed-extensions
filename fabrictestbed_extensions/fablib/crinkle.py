@@ -30,6 +30,7 @@ CAPERSTART = "./caper/caper.byte -q -p -e"
 PCAPDIR = "/home/ubuntu/pcaps/"
 LOCALP4DIR = "."
 REMOTEWORKDIR = ".crinkle"
+CREASEDIR = "fabrictestbed_extensions/fabrictestbed_extensions/fablib/crease"
 
 TCPDUMP_IMAGES = ["default_ubuntu_20",
                   "default_ubuntu_22",
@@ -863,7 +864,7 @@ class CrinkleSlice(Slice):
             refreshed_monitor = self.get_monitor(monitor.get_name())
             mon_site = refreshed_monitor.get_site()
             refreshed_monitor.execute(f"mkdir {REMOTEWORKDIR}")
-            jobs.append(refreshed_monitor.upload_file_thread(f"{LOCALP4DIR}/base-crinkle.p4", f"{REMOTEWORKDIR}/base-crinkle.p4"))
+            jobs.append(refreshed_monitor.upload_file_thread(f"{CREASEDIR}/base-crinkle.p4", f"{REMOTEWORKDIR}/base-crinkle.p4"))
             jobs.append(refreshed_monitor.execute_thread('source /etc/lsb-release; '
                                                          'echo "deb http://download.opensuse.org/repositories/home:/p4lang/xUbuntu_${DISTRIB_RELEASE}/ /" | sudo tee /etc/apt/sources.list.d/home:p4lang.list; '
                                                          'curl -fsSL https://download.opensuse.org/repositories/home:p4lang/xUbuntu_${DISTRIB_RELEASE}/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/home_p4lang.gpg > /dev/null; '
@@ -906,7 +907,7 @@ class CrinkleSlice(Slice):
                                   'add analyzer CommandLine\n'
                                   'add storage Neo4j database=/home/ubuntu/spade_database\n')
         self.analyzer.execute(f'echo -e "{spade_control_commands}" | ./SPADE/bin/spade control', quiet=True)
-        self.analyzer.upload_file("spade_reader.py", "spade_reader.py")
+        self.analyzer.upload_file(f"{CREASEDIR}/spade_reader.py", "spade_reader.py")
         self.analyzer.execute("sudo chmod u+x spade_reader.py")
         self.analyzer.execute_thread(f"sudo ./spade_reader.py {self.monitor_string}")
         logging.info(f"Crinkle post_boot_config done")
