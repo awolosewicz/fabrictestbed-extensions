@@ -30,7 +30,7 @@ CAPERSTART = "./caper/caper.byte -q -p -e"
 PCAPDIR = "/home/ubuntu/pcaps/"
 LOCALP4DIR = "."
 REMOTEWORKDIR = ".crinkle"
-CREASEDIR = "fabrictestbed_extensions/fabrictestbed_extensions/fablib/crease"
+CREASEDIR = "fabrictestbed-extensions/fabrictestbed_extensions/fablib/crease"
 
 TCPDUMP_IMAGES = ["default_ubuntu_20",
                   "default_ubuntu_22",
@@ -141,7 +141,7 @@ class CrinkleMonitor(Node):
     default_image = "default_ubuntu_22"
     default_cores = 2
     default_ram = 2
-    default_disk = 10
+    default_disk = 15
 
     class MonitorData():
         def __init__(
