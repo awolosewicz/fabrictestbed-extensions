@@ -4,9 +4,12 @@
 #define _POSIX_C_SOURCE 199309L
 #include <stdint.h>
 #include <stdlib.h>
-#include <inttypes.h>
-#include <sys/time.h>
 #include <stdio.h>
+#include <unistd.h>
+#include <inttypes.h>
+#include <arpa/inet.h>
+#include <sys/time.h>
+
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_cycles.h>
@@ -21,6 +24,10 @@
 #define BURST_SIZE 32
 
 #define NSEC_PER_SEC        1000000000L
+
+#define MONPROT 0x6587
+#define MONPROT0 0x65
+#define MONPROT1 0x87
 
 // HW timestamping code derived from rxtx_calbacks
 static int hwts_dynfield_offset = -1;
@@ -68,6 +75,8 @@ ns_to_timeval(int64_t nsec)
 
 /* basicfwd.c: Basic DPDK skeleton forwarding example. */
 static uint64_t measures[16];
+unsigned char ana_headers[64];
+uint64_t mon_id;
 
 /*
  * Initializes a given port using global settings and with the RX buffers
@@ -206,8 +215,16 @@ hwts_to_ns(rte_mbuf_timestamp_t hwts) {
 
 bool lendian = false;
 
+static inline uint32_t
+swap_endian(uint32_t value) {
+    return ((value >> 24) & 0x000000FF) |
+           ((value >> 8)  & 0x0000FF00) |
+           ((value << 8)  & 0x00FF0000) |
+           ((value << 24) & 0xFF000000);
+}
+
 static inline uint64_t
-swap_endian(uint64_t value) {
+swap_endian_long(uint64_t value) {
     return ((value >> 56) & 0x00000000000000FF) |
            ((value >> 40) & 0x000000000000FF00) |
            ((value >> 24) & 0x0000000000FF0000) |
@@ -218,44 +235,56 @@ swap_endian(uint64_t value) {
            ((value << 56) & 0xFF00000000000000);
 }
 
+/**
+ * This function handles adding (if needed) the custom trailer that stores the packet UID.
+ * The UID is formed as:
+ * 0                 64       80         96          112       128
+ * | timestamp in ns | mon_id | port num | frame len | MONPROT |
+ * Additionally, this function crafts the packet that goes to the analyzer, which is formed as
+ * | ethernet + ip to get to analyzer | timestamp in ns | UID trailer | 80 bytes of header stack |
+ */
 static inline void
 crinkle_forward(
 	struct rte_mbuf **bufs,
 	char **c_plds,
 	const uint16_t nb_pkts,
-	const uint64_t systime_ns)
+	const uint64_t systime_ns,
+	const uint64_t port)
 {
 	for (int i = 0; i < nb_pkts; ++i) {
 		struct rte_mbuf *buf = bufs[i];
 		char *c_pld = c_plds[i];
+		uint32_t *candidate_trailer_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
+		uint32_t candidate_trailer = swap_endian(*candidate_trailer_ptr);
 
-		uint64_t time;
-		if (hw_timestamping) {
-			time = systime_ns + hwts_to_ns(*hwts_field(buf));
+		// If the packet already has a UID trailer
+		if ((candidate_trailer & 0x0000FFFF) == MONPROT && (candidate_trailer >> 16) == buf->data_len-16) {
+			uint64_t time = systime_ns + i;
+			if (lendian) time = swap_endian_long(time);
+			rte_mov15_or_less(c_pld, (char *)&time, 8);
+			rte_mov16(c_pld+8, (char *)candidate_trailer_ptr - 12);
+			char * buf_start = rte_pktmbuf_mtod(buf, char*);
+			rte_mov64(c_pld+24, buf_start);
+			rte_mov16(c_pld+88, buf_start+64);
 		}
 		else {
-			time = systime_ns + i;
-		}
-		char * trailer = rte_pktmbuf_append(buf, 16);
-		static const uint64_t id = 0x0123456789ABCDEF;
-		if (lendian) {
-			uint64_t id2 = swap_endian(id);
-			uint64_t time2 = swap_endian(time);
-			*((uint64_t *)trailer) = id2;
-			*((uint64_t *)c_pld) = id2;
-			*((uint64_t *)(trailer+64)) = time2;
-			*((uint64_t *)(c_pld+8)) = time2;
-		}
-		else {
-			*((uint64_t *)trailer) = id;
-			*((uint64_t *)c_pld) = id;
-			*((uint64_t *)(trailer+64)) = time;
-			*((uint64_t *)(c_pld+8)) = time;
-		}
-		char * buf_start = rte_pktmbuf_mtod(buf, char*);
-		rte_mov64(c_pld+16, buf_start);
-		rte_mov16(c_pld+80, buf_start+64);
+			uint64_t uid_trailer[2];
+			uid_trailer[0] = systime_ns + i;
+			uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uint64_t)(buf->data_len) << 16) + MONPROT;
+			if (lendian) {
+				uid_trailer[0] = swap_endian_long(uid_trailer[0]);
+				uid_trailer[1] = swap_endian_long(uid_trailer[1]);
+			}
+			
+			char *trailer = rte_pktmbuf_append(buf, 16);
+			rte_mov16(trailer, (char *)uid_trailer);
 
+			rte_mov15_or_less(c_pld, (char *)&uid_trailer[0], 8);
+			rte_mov16(c_pld+8, (char *)uid_trailer);
+			char * buf_start = rte_pktmbuf_mtod(buf, char*);
+			rte_mov64(c_pld+24, buf_start);
+			rte_mov16(c_pld+88, buf_start+64);
+		}
 	}
 }
 
@@ -266,7 +295,7 @@ crinkle_forward(
 
  /* Basic forwarding application lcore. 8< */
 static __rte_noreturn void
-lcore_main(struct rte_mempool *mbuf_pool)
+lcore_main(struct rte_mempool *mbuf_pool, uint16_t ports[])
 {
 	uint16_t port;
 
@@ -287,10 +316,6 @@ lcore_main(struct rte_mempool *mbuf_pool)
 
 	/* Main work of application loop. 8< */
 	uint8_t ctr = 0;
-	//p2 is the analyzer port
-	const uint16_t p0 = 1;
-	const uint16_t p1 = 2;
-	const uint16_t p2 = 0;
 	struct timespec systime;
 	uint64_t systime_ns;
 
@@ -306,17 +331,13 @@ lcore_main(struct rte_mempool *mbuf_pool)
 	if (retval != 0) {
 		printf("Failed to allocate clone bufs: Code %i\n", retval);
 	}
-	char *clone_plds[BURST_SIZE];
+	char *c_plds[BURST_SIZE];
 	// Clone addresses will always be the same, so keep constant
 	for (int i = 0; i < BURST_SIZE; ++i) {
 		struct rte_mbuf *cbuf = clone_bufs[i];
 		char *c = rte_pktmbuf_append(cbuf, 64+16+80);
-		static const unsigned char data[64] = "\xb0\xa6\x51\xe2\x44\xda\x0a\x66\xc4\x9b\xa7\x99\x86\xdd\x60\x00\x00\x00\x00\x50\xfe\x40"
-											  "\x26\x02\xfc\xfb\x00\x22\x00\x01\x08\x66\xc4\xff\xfe\x9b\xa7\x99"
-											  "\x26\x02\xfc\xfb\x00\x22\x00\x01\x04\xb4\xea\xff\xfe\x74\x3c\xe8"
-											  "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
-		rte_mov64(c, data);
-		clone_plds[i] = c + 64;
+		rte_mov64(c, ana_headers);
+		c_plds[i] = c + 56;
 	}
 	for (;;) {
 		/*
@@ -325,7 +346,8 @@ lcore_main(struct rte_mempool *mbuf_pool)
 		 */
 		RTE_ETH_FOREACH_DEV(port) {
 
-			if (port == p2) continue;
+			// port 0 is the analyzer
+			if (port == ports[0]) continue;
 
 			/* Get burst of RX packets, from first port of pair. */
 			struct rte_mbuf *bufs[BURST_SIZE];
@@ -338,17 +360,17 @@ lcore_main(struct rte_mempool *mbuf_pool)
 			uint64_t start = rte_get_tsc_cycles();
 			clock_gettime(CLOCK_REALTIME, &systime);
 			systime_ns = timespec64_to_ns(&systime);
-			crinkle_forward(bufs, clone_plds, nb_rx, systime_ns);
+			crinkle_forward(bufs, c_plds, nb_rx, systime_ns, port);
 			uint64_t end = rte_get_tsc_cycles();
 
 			/* Send burst of TX packets, to second port of pair. */
 			uint16_t nb_tx = 0;
-			if (port == p0) {
-				nb_tx = rte_eth_tx_burst(p1, 0,
+			if (port == ports[1]) {
+				nb_tx = rte_eth_tx_burst(ports[2], 0,
 						bufs, nb_rx);
 			}
 			else {
-				nb_tx = rte_eth_tx_burst(p0, 0,
+				nb_tx = rte_eth_tx_burst(ports[1], 0,
 						bufs, nb_rx);
 			}
 
@@ -359,7 +381,7 @@ lcore_main(struct rte_mempool *mbuf_pool)
 					rte_pktmbuf_free(bufs[buf]);
 			}
 			
-			nb_tx = rte_eth_tx_burst(p2, 0, clone_bufs, nb_rx);
+			nb_tx = rte_eth_tx_burst(ports[0], 0, clone_bufs, nb_rx);
 			/* Free any unsent packets. */
 			if (unlikely(nb_tx < nb_rx)) {
 				uint16_t buf;
@@ -383,6 +405,8 @@ lcore_main(struct rte_mempool *mbuf_pool)
 }
 /* >8 End Basic forwarding application lcore. */
 
+
+
 /*
  * The main function, which does initialization and calls the per-lcore
  * functions.
@@ -393,11 +417,6 @@ main(int argc, char *argv[])
 	struct rte_mempool *mbuf_pool;
 	unsigned nb_ports;
 	uint16_t portid;
-	// uint64_t tstart = rte_get_tsc_cycles();
-	// struct rte_mbuf * data2 = rte_pktmbuf_alloc(mbuf_pool);
-	// uint64_t tend = rte_get_tsc_cycles();
-	// uint64_t hz2 = rte_get_tsc_cycles();
-	// printf("Delta %lu at hz %lu", tend-tstart, hz2);
 
 	/* Initializion the Environment Abstraction Layer (EAL). 8< */
 	int ret = rte_eal_init(argc, argv);
@@ -410,8 +429,103 @@ main(int argc, char *argv[])
 
 	/* Check that there is an even number of ports to send/receive on. */
 	nb_ports = rte_eth_dev_count_avail();
-	// if (nb_ports < 2 || (nb_ports & 1))
-	// 	rte_exit(EXIT_FAILURE, "Error: number of ports must be even\n");
+	
+	int arg;
+	char *argval;
+	uint16_t ports[nb_ports];
+	bool set_mon_id = false;
+	bool set_macs = false;
+	bool set_ips = false;
+
+	const unsigned char ipdata[10] = "\x86\xdd\x60\x00\x00\x00\x00\x50\xfe\x40";
+	rte_memcpy(&ana_headers[12], ipdata, 10);
+	const unsigned char padding[10] = "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+	rte_memcpy(&ana_headers[54], padding, 10);
+	bool macdst = false;
+	bool ipdst = false;
+
+	while ((arg = getopt(argc, argv, "n:d:m:i:h")) != -1) {
+		switch (arg) {
+			case 'n':
+				mon_id = strtol(optarg, NULL, 0);
+				set_mon_id = true;
+				break;
+			case 'd':
+				// [dpdk virtual port]@[device number as parsed into dpdk]
+				uint16_t vport, devport;
+				sscanf(optarg, "%hu@%hu", &vport, &devport);
+				ports[vport] = devport;
+				break;
+			case 'm':
+				// MAC addresses, source then dest
+				int parsed = 0;
+				if (macdst) {
+					parsed = sscanf(optarg, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+									&ana_headers[0], &ana_headers[1], &ana_headers[2],
+									&ana_headers[3], &ana_headers[4], &ana_headers[5]);
+					set_macs = true;
+				}
+				else {
+					parsed = sscanf(optarg, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+									&ana_headers[6], &ana_headers[7], &ana_headers[8],
+									&ana_headers[9], &ana_headers[10], &ana_headers[11]);
+					macdst = true;
+				}
+				if (parsed != 6) {
+					rte_exit(EXIT_FAILURE, "Invalid MAC address\n");
+				}
+				break;
+			case 'i':
+				// IPv6 addresses, source then dest
+				if (ipdst) {
+					if (inet_pton(AF_INET6, optarg, &ana_headers[38]) != 1) {
+						rte_exit(EXIT_FAILURE, "Invalid IPv6 address\n");
+					}
+					set_ips = true;
+				}
+				else {
+					if (inet_pton(AF_INET6, optarg, &ana_headers[22]) != 1) {
+						rte_exit(EXIT_FAILURE, "Invalid IPv6 address\n");
+					}
+					ipdst = true;
+				}
+				break;
+			case 'h':
+				printf("Available options:\n");
+				printf("  -n    Set monitor ID\n");
+				printf("  -d    Set virtual-actual device mappings, as [virtual]@[actual], actual as parsed by dpdk\n");
+				printf("  -m    Set MAC addresses for analyzer (source then dest)\n");
+				printf("  -i    Set IP addresses for analyzer (source then dest)\n");
+				printf("  -h    Print this help\n");
+				exit(EXIT_SUCCESS);
+			case '?':
+				switch (optopt) {
+					case 'd':
+					case 'm':
+					case 'i':
+					case 'n':
+						rte_exit(EXIT_FAILURE, "Option -%c requires an argument.\n", optopt);
+					default:
+						rte_exit(EXIT_FAILURE, "Unknown option -%c.\n", optopt);
+				}
+			default:
+				abort();
+		}
+	}
+	if (!set_macs) {
+		rte_exit(EXIT_FAILURE, "Missing MAC addresses for analyzer connection.\n");
+	}
+	if (!set_ips) {
+		rte_exit(EXIT_FAILURE, "Missing IP addresses for analyzer connection.\n");
+	}
+	if (!set_mon_id) {
+		rte_exit(EXIT_FAILURE, "Did not set monitor id.\n");
+	}
+	for (int i = 0; i < nb_ports; ++i) {
+		if (ports[i] >= nb_ports || ports[i] < 0) {
+			rte_exit(EXIT_FAILURE, "Invalid port mapping for virtual port %hu: %hu.\n", i, ports[i]);
+		}
+	}
 
 	/* Creates a new mempool in memory to hold the mbufs. */
 
@@ -437,7 +551,7 @@ main(int argc, char *argv[])
 	printf("Running at %lu hz\n", tsc_hz);
 
 	/* Call lcore_main on the main core only. Called on single lcore. 8< */
-	lcore_main(mbuf_pool);
+	lcore_main(mbuf_pool, ports);
 	/* >8 End of called on single lcore. */
 
 	/* clean up the EAL */
