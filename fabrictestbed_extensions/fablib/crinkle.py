@@ -32,6 +32,8 @@ LOCALP4DIR = "."
 REMOTEWORKDIR = ".crinkle"
 CREASEDIR = "fabrictestbed-extensions/fabrictestbed_extensions/fablib/crease"
 SWITCHPREFIX = "~/bmv2-remote-attestation/targets/simple_switch/"
+MONITORURL = "https://transparnet.cs.iit.edu/~awolosewicz/crease_monitor-static"
+DPDKNAME = "crease_monitor-static"
 
 TCPDUMP_IMAGES = ["default_ubuntu_20",
                   "default_ubuntu_22",
@@ -141,14 +143,14 @@ class CrinkleMonitor(Node):
 
     default_image = "attestable_bmv2_v2_ubuntu_20"
     default_cores = 2
-    default_ram = 2
+    default_ram = 4
     default_disk = 10
 
     class MonitorData():
         def __init__(
             self,
             port_nums: int = 0,
-            port_sequence: str = "",
+            cmd_args: str = "",
             net_name: str = None,
             net_type: str = None,
             cnet_iface: Interface = None,
@@ -156,7 +158,7 @@ class CrinkleMonitor(Node):
             monitor_id: int = None
         ):
             self.port_nums = port_nums
-            self.port_sequence = port_sequence
+            self.cmd_args = cmd_args
             self.net_name = net_name
             self.net_type = net_type
             self.cnet_iface = cnet_iface
@@ -217,7 +219,7 @@ class CrinkleMonitor(Node):
         )
         
         if site == "EDUKY":
-            monitor.set_image("default_ubuntu_20")
+            monitor.set_image("default_ubuntu_22")
         else:
             monitor.set_image(CrinkleMonitor.default_image)
 
@@ -259,7 +261,7 @@ class CrinkleMonitor(Node):
                 )
             self.data = self.MonitorData(
                 port_nums=data["port_nums"],
-                port_sequence=data["port_sequence"],
+                cmd_args=data["cmd_args"],
                 net_name=data["net_name"],
                 net_type=data["net_type"],
                 cnet_iface=self.slice.get_interface(data["cnet_iface"]),
@@ -284,7 +286,7 @@ class CrinkleMonitor(Node):
             )
         data_dict = {
             "port_nums": self.data.port_nums,
-            "port_sequence": self.data.port_sequence,
+            "cmd_args": self.data.cmd_args,
             "net_name": self.data.net_name,
             "net_type": self.data.net_type,
             "cnet_iface": self.data.cnet_iface.get_name(),
@@ -347,6 +349,39 @@ class CrinkleSlice(Slice):
             fablib_manager.cache_slice(slice_object=slice)
         return slice
     
+    def get_crinkle_data(self, analyzer: CrinkleAnalyzer):
+        """
+        Get slice-wide crinkle data.
+        """
+        logging.info(f"get_crinkle_data()")
+        if "crinkle_slice_config" in analyzer.get_user_data():
+            data = self.analyzer.get_user_data()["crinkle_slice_config"]
+            #data_iface_mappings = self.get_user_data()["iface_mappings"]
+            #logging.info(f"Retrieved monitor iface mappings as: {data_iface_mappings}")
+            self.analyzer_name = data["analyzer_name"]
+            self.prefix = data["prefix"]
+            self.monitor_string = data["monitor_string"]
+            logging.info(f"Retrieved crinkle slice config as:\n{self.analyzer_name}\n{self.prefix}\n{self.monitor_string}")
+        else:
+            logging.info(f"Did not retrieve stored crinkle slice config")
+        
+    def set_crinkle_data(self):
+        """
+        Set slice-wide crinkle data.
+        """
+        logging.info(f"set_crinkle_data()")
+        user_data = self.analyzer.get_user_data()
+        data_dict = {
+            "analyzer_name": self.analyzer_name,
+            "prefix": self.prefix,
+            "monitor_string": self.monitor_string
+        }
+        logging.info(f"Writing crinkle slice config to user data: {data_dict}")
+        user_data["crinkle_slice_config"] = data_dict
+        #logging.info(f"Writing monitor iface mappings to user data: {iface_mappings}")
+        #user_data["iface_mappings"] = iface_mappings
+        self.analyzer.set_user_data(user_data=user_data)
+    
     @staticmethod
     def get_slice(
         fablib_manager: FablibManager,
@@ -394,6 +429,7 @@ class CrinkleSlice(Slice):
             logging.error(e, exc_info=True)
 
         slice.analyzer = slice.get_analyzer(name=f"{name_prefix}_analyzer")
+        slice.get_crinkle_data(slice.analyzer)
         analyzer_site = slice.analyzer.get_site()
         for net in slice.get_networks():
             if net.get_name().startswith(f"{name_prefix}_net_"):
@@ -566,7 +602,7 @@ class CrinkleSlice(Slice):
         monitor.set_capacities(cores=CrinkleMonitor.default_cores, ram=CrinkleMonitor.default_ram, disk=CrinkleMonitor.default_disk)
         
         if site == "EDUKY":
-            monitor.set_image("default_ubuntu_20")
+            monitor.set_image("default_ubuntu_22")
         else:
             monitor.set_image(CrinkleMonitor.default_image)
 
@@ -858,7 +894,10 @@ class CrinkleSlice(Slice):
         self.cnets[site]=self.analyzer_cnet
         jobs: list[futures.Future] = []
         counter = 0
-        spade_commands = (f'mkdir {REMOTEWORKDIR};'
+        spade_commands = ""
+        if site == "EDUKY":
+            spade_commands += """sudo bash -c 'echo "2600:2701:5000:5001::6c9d:8e76 neo4j.com" >> /etc/hosts';"""
+        spade_commands += (f'mkdir {REMOTEWORKDIR};'
                           'git clone https://github.com/ashish-gehani/SPADE.git;'
                           'sudo add-apt-repository -y ppa:openjdk-r/ppa; sudo apt-get update; sudo apt-get install -y openjdk-11-jdk;'
                           'sudo apt-get install -y auditd bison clang cmake curl flex fuse git ifupdown libaudit-dev libfuse-dev linux-headers-`uname -r` lsof pkg-config unzip uthash-dev wget;'
@@ -871,28 +910,34 @@ class CrinkleSlice(Slice):
             logging.info(f"Refreshing monitor for net {key} after slice creation, count {counter}")
             refreshed_monitor = self.get_monitor(monitor.get_name())
             mon_site = refreshed_monitor.get_site()
-            refreshed_monitor.execute(f"mkdir {REMOTEWORKDIR}")
-            jobs.append(refreshed_monitor.upload_file_thread(f"{CREASEDIR}/base-crinkle.p4", f"{REMOTEWORKDIR}/base-crinkle.p4"))
-            if mon_site == "EDUKY":
-                jobs.append(refreshed_monitor.execute_thread(('''sudo bash -c 'echo "2600:2701:5000:5001::c387:dfe2 download.opensuse.org" >> /etc/hosts'\n'''
-                          'echo "deb http://download.opensuse.org/repositories/home:/p4lang/xUbuntu_20.04/ /" | sudo tee /etc/apt/sources.list.d/home:p4lang.list\n'
-                          'curl -fsSL https://download.opensuse.org/repositories/home:p4lang/xUbuntu_20.04/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/home_p4lang.gpg > /dev/null\n'
-                          'sudo apt-get update\n'
-                          'sudo apt install -y p4lang-p4c net-tools python3-scapy\n'
-                          'sudo sysctl net.ipv6.conf.all.forwarding=0\n')))
-            jobs.append(refreshed_monitor.execute_thread('sudo apt update; sudo apt install -y python3-scapy'))
+            jobs.append(refreshed_monitor.execute_thread("sudo apt update; sudo apt install -y python3-scapy\n"
+                                                         "sudo apt install -y --no-install-recommends libibverbs-dev linux-image-generic jq\n"
+                                                         "sudo sed -i 's/GRUB_CMDLINE_LINUX=\"\"/GRUB_CMDLINE_LINUX=\"default_hugepagesz=1G hugepagesz=1G hugepages=2s\"/' /etc/default/grub\n"
+                                                         "sudo grub-mkconfig -o /boot/grub/grub.cfg; sudo update-grub\n"
+                                                         f"wget -q {MONITORURL}; chmod u+x {DPDKNAME}"))
             if self.cnets[mon_site] is None or not self.cnets[mon_site].is_instantiated():
                 self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_net_{mon_site}")
             refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_net_{mon_site}")
+            ordered_devs = {}
+            ctr = 0
+            # Need a way to know where a specific interface falls *in the OS ordering of them*
+            # Such as, if an interface is device enp8s0, and OS has enp7s0, enp8s0, enp9s0, return 1
+            # And because this isn't consistent per site, cannot assume enp7s0 is first
+            for entry in refreshed_monitor.get_dataplane_os_interfaces():
+                ordered_devs[entry['ifname']] = ctr
+                ctr += 1
+            refreshed_monitor.data.cmd_args += f"-n {refreshed_monitor.data.monitor_id} "
+            refreshed_monitor.data.cmd_args += f"-m {refreshed_monitor.data.cnet_iface.get_mac()} -m {self.analyzer_iface.get_mac()} "
+            refreshed_monitor.data.cmd_args += f"-i {refreshed_monitor.data.cnet_iface.get_ip_addr()} -i {self.analyzer_iface.get_ip_addr()} "
             dev_name = refreshed_monitor.data.cnet_iface.get_device_name()
-            refreshed_monitor.data.port_sequence += f"-i {refreshed_monitor.data.port_nums}@{dev_name} "
+            refreshed_monitor.data.cmd_args += f"-d {refreshed_monitor.data.port_nums}@{ordered_devs[dev_name]} "
             refreshed_monitor.data.port_nums += 1
             self.monitor_string += f'{refreshed_monitor.data.monitor_id} '
             for data in monitor.creation_data:
                 logging.info(f"Initializing monitor after slice creation with data: {data}")
                 mon_iface = refreshed_monitor.get_component(name=data[MonNetData.MIFACENAME]).get_interfaces()[0]
                 dev_name = mon_iface.get_device_name()
-                refreshed_monitor.data.port_sequence += f"-i{refreshed_monitor.data.port_nums}@{dev_name} "
+                refreshed_monitor.data.cmd_args += f"-d {refreshed_monitor.data.port_nums}@{ordered_devs[dev_name]} "
                 refreshed_monitor.data.iface_mappings[data[MonNetData.IFACENAME]] = (
                     data[MonNetData.NODENAME], mon_iface, data[MonNetData.ISSINK], refreshed_monitor.data.port_nums)
                 self.monitor_string += f'{refreshed_monitor.data.port_nums}@{data[MonNetData.IFACENAME]} '
@@ -903,17 +948,29 @@ class CrinkleSlice(Slice):
             refreshed_monitor.set_monitor_data()
             counter += 1
         self.monitor_string = self.monitor_string.rstrip()
+        self.set_crinkle_data()
         logging.info(f"Crinkle post_boot_config waiting on jobs to finish")
         print("Configuring Crinkle Resources")
-        futures.wait(jobs)
+        ctr = 0
+        for _ in futures.as_completed(jobs):
+            ctr += 1
+            logging.info(f'{ctr}/{len(jobs)} jobs finished')
+            print(f'{ctr}/{len(jobs)} jobs finished')
         logging.info(f"Saving Crinkle Data")
         self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False, allocate_hosts=False)
         self.update()
+        logging.info(f"Rebooting Crinkle monitors")
+        print("Rebooting Crinkle Resources")
+        for monitor in self.monitors.values():
+            monitor.execute("sudo reboot")
+        logging.info(f"Waiting on Crinkle monitors to finish reboot")
+        self.wait_ssh(progress=True)
         logging.info(f'Waiting on Crinkle analyzer SPADE install to finish')
+        print("Waiting on Crinkle analyzer SPADE install to finish")
         futures.wait([spade_job])
         logging.info(f'Starting SPADE')
         self.analyzer.execute_thread('./SPADE/bin/spade debug')
-        time.sleep(3)
+        time.sleep(5)
         spade_control_commands = ('add reporter DSL /home/ubuntu/spade_pipe\n'
                                   'add analyzer CommandLine\n'
                                   'add storage Neo4j database=/home/ubuntu/spade_database\n')
@@ -922,6 +979,7 @@ class CrinkleSlice(Slice):
         self.analyzer.execute("sudo chmod u+x spade_reader.py")
         self.analyzer.execute_thread(f"sudo ./spade_reader.py {self.monitor_string}")
         logging.info(f"Crinkle post_boot_config done")
+        print("Crinkle post_boot_config done")
 
     @staticmethod
     def mac_to_int(mac: str):
@@ -952,26 +1010,6 @@ class CrinkleSlice(Slice):
         """
         ip6 = IPv6Address(ip6)
         return (int(ip6)//(2**64),int(ip6)%(2**64))
-        
-    def start_bmv2(self, monitor: CrinkleMonitor, wait: bool=True):
-        """
-        Initialize the BMv2 process on a monitor.
-
-        :param monitor: The monitor
-        :type monitor: CrinkleMonitor
-        :param wait: Whether this call should block or not, default True
-        :type wait: bool
-        :return: The future of a non-blocking call, or None
-        :rtype: concurrent.futures.Future
-        """
-        command = (f'p4c --target bmv2 --arch v1model {REMOTEWORKDIR}/base-crinkle.p4 -o {REMOTEWORKDIR};'
-                   f'nohup bash -c "sudo simple_switch {monitor.data.port_sequence}{REMOTEWORKDIR}/base-crinkle.json --log-file ~/monitor.log -- --enable-swap; echo " 1> /dev/null 2> /dev/null &')
-        job = None
-        if wait:
-            monitor.execute(command=command)
-        else:
-            job = monitor.execute_thread(command=command)
-        return job
     
     def probe(self, scapy: str, iface_name: str, name: str = "probe"):
         """
@@ -1000,59 +1038,6 @@ class CrinkleSlice(Slice):
         new_scapy = f'Raw({scapy})/Raw(int({uid}).to_bytes(16, \\"big\\"))'
         monitor.execute(f'''echo -e "from scapy.all import *\npkt={new_scapy}\nsendp(pkt, iface='{dev_name}')\n" | sudo python3''')
         self.get_graph(name=name, pkt_id=uid)
-    
-    def configure_bridging(self, monitor: CrinkleMonitor, wait: bool=True):
-        """
-        Configures the monitor bridging and other functions.
-
-        :param monitor: The monitor to configure
-        :type monitor: CrinkleMonitor
-        :param wait: Whether this call is blocking, default True
-        :type wait: bool
-        :return: The future of a non-blocking call, or None
-        :rtype: concurrent.futures.Future
-        """
-        p4_commands = []
-        if monitor.data.net_type in ["L2Bridge", "L2STS", "L2PTP"]:
-            sinks = {}
-            p4_commands = ["table_add table_l2_bridge l2_bridge 1 => 2",
-                           "table_add table_l2_bridge l2_bridge 2 => 1",
-                           f'register_write macs 1 {self.mac_to_int("ff:ff:ff:ff:ff:ff")}',
-                           f'register_write macs 0 {self.mac_to_int(monitor.data.cnet_iface.get_mac())}',
-                           f'register_write ip1 0 {self.ip6_to_int(monitor.data.cnet_iface.get_ip_addr())[0]}',
-                           f'register_write ip1 1 {self.ip6_to_int(self.analyzer_iface.get_ip_addr())[0]}',
-                           f'register_write ip2 0 {self.ip6_to_int(monitor.data.cnet_iface.get_ip_addr())[1]}',
-                           f'register_write ip2 1 {self.ip6_to_int(self.analyzer_iface.get_ip_addr())[1]}',
-                           'register_write swport 0 0',
-                           'register_write trunc 0 80',
-                           f'register_write r_monitor_id 0 {monitor.data.monitor_id}',
-                           f'register_write r_monitor_id2 0 {monitor.data.monitor_id}',
-                           'mirroring_add 5 0']
-            for _, (_, _, is_sink, port_num) in monitor.data.iface_mappings.items():
-                if is_sink:
-                    p4_commands.append(f'table_add table_do_uid strip_uid {port_num} => ')
-                sinks[port_num] = is_sink
-        p4_command_chain = ""
-        for command in p4_commands[:-1]:
-            p4_command_chain += command+'\n'
-        p4_command_chain += p4_commands[-1]
-        job = None
-        if wait:
-            monitor.execute(f'echo -e "{p4_command_chain}" | simple_switch_CLI')
-        else:
-            job = monitor.execute_thread(f'echo -e "{p4_command_chain}" | simple_switch_CLI')
-        return job
-    
-    def configure_all_bridging(self):
-        """
-        Call configure_bridging for every monitor in the slice.
-        """
-        logging.info(f"Adding default bmv2 rules for monitors")
-        jobs = []
-        for monitor in self.monitors.values():
-            jobs.append(self.configure_bridging(monitor=monitor, wait=False))
-        logging.info(f"Waiting for rules jobs to finish")
-        futures.wait(jobs)
 
     @staticmethod
     def ip_net_like(net: str):
@@ -1206,56 +1191,60 @@ class CrinkleSlice(Slice):
         self.analyzer.execute(f'''sudo killall python3; echo -e "remove storage Neo4j\n" | ./SPADE/bin/spade control; rm -rf spade_database/; echo -e "add storage Neo4j database=/home/ubuntu/spade_database\n" | ./SPADE/bin/spade control''', quiet=quiet)
         self.analyzer.execute_thread(f'sudo ./spade_reader.py {self.monitor_string}')
     
-    def start_monitor(self, monitor: CrinkleMonitor, wait: bool=True) -> tuple[list[futures.Future], futures.Future]:
+    def start_monitor(self, monitor: CrinkleMonitor, wait: bool=True, quiet: bool=False) -> futures.Future | None:
         """
-        Start BMv2 on a monitor and, if blocking, configure it.
+        Start the DPDK script on a monitor.
 
         :param monitor: The monitor node to target
         :type monitor: CrinkleMonitor
         :param wait: Whether this call is blocking, default True
         :type wait: bool
+        :param quiet: Whether to print stdout/stderr of a blocking call, default False
+        :type quiet: bool
         :return: The future of a non-blocking call, or None
         :rtype: concurrent.futures.Future
         """
         if monitor is None:
             raise Exception("Monitor cannot be None")
-        bmv2_start = self.start_bmv2(monitor=monitor, wait=wait)
+        logging.info(f"Starting Crinkle monitor {monitor.data.net_name}")
+        job = None
         if wait:
-            logging.info(f"Adding default bmv2 rules for {monitor.data.net_name} monitor")
-            self.configure_bridging(monitor=monitor, wait=True)
-        return bmv2_start
+            monitor.execute(f"sudo ./{DPDKNAME} -- {monitor.data.cmd_args} &", quiet=quiet)
+        else:
+            job = monitor.execute_thread(f"sudo ./{DPDKNAME} -- {monitor.data.cmd_args}")
+        return job
         
-    def start_all_monitors(self, wait: bool=True):
+    def start_all_monitors(self, wait: bool=True, no_return: bool=True) -> list[futures.Future] | None:
         """
-        Start BMv2 on all monitors and, if blocking, configure them.
+        Start the DPDK script on all monitors.
 
         :param wait: Whether this call is blocking, default True
         :type wait: bool
-        :return: The future of a non-blocking call, or None
-        :rtype: concurrent.futures.Future
+        :param no_return: Whether to return None instead of the list of jobs
+        :type no_return: bool
+        :return: The futures of all started jobs
+        :rtype: list[concurrent.futures.Future]
         """
-        bmv2_list: list[futures.Future] = []
+        start_list: list[futures.Future] = []
         for monitor in self.monitors.values():
-            bmv2_list.append(self.start_monitor(monitor=monitor, wait=False))
+            start_list.append(self.start_monitor(monitor=monitor, wait=False))
         if wait:
-            logging.info(f"Waiting for monitors to finish starting bmv2 processes ")
-            futures.wait(bmv2_list)
-            self.configure_all_bridging()
-        return bmv2_list
+            logging.info(f"Waiting for monitors to finish starting")
+            ctr = 0
+            max = len(start_list)
+            while ctr < max:
+                if start_list[ctr].running():
+                    ctr += 1
+                    logging.info(f'{ctr}/{max} started')
+        if (no_return):
+            return
+        return start_list
 
     def stop_monitor(self, monitor: CrinkleMonitor):
         if monitor is None:
-            raise Exception("mon_net cannot be None")
-        monitor.execute("sudo killall simple_switch")
+            raise Exception("monitor cannot be None")
+        monitor.execute(f"sudo killall {DPDKNAME}")
 
     def stop_all_monitors(self):
         for monitor in self.monitors.values():
             self.stop_monitor(monitor=monitor)
-
-    def retrieve_pcaps(self, monitor: CrinkleMonitor):
-        if monitor is None:
-            raise Exception("mon_net cannot be None")
-        shutil.rmtree(f"{self.pcaps_dir}/{monitor.data.net_name}/.", True)
-        monitor.download_directory(f"{self.pcaps_dir}/{monitor.data.net_name}", remote_directory_path=f"{monitor.data.net_name}")
-        self.analyzer.execute(f"sudo rm -rf {PCAPDIR}/{monitor.data.net_name}")
-        self.analyzer.upload_directory(f"{self.pcaps_dir}/{monitor.data.net_name}", f"{PCAPDIR}/{monitor.data.net_name}")
