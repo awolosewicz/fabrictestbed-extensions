@@ -3007,9 +3007,9 @@ Host * !bastion.fabric-testbed.net
         allocated_core = allocated.setdefault("core", 0)
         allocated_ram = allocated.setdefault("ram", 0)
         allocated_disk = allocated.setdefault("disk", 0)
-        available_cores = host.get_core_available()
-        available_ram = host.get_ram_available()
-        available_disk = host.get_disk_available()
+        available_cores = host.get_core_available() - allocated_core
+        available_ram = host.get_ram_available() - allocated_ram
+        available_disk = host.get_disk_available() - allocated_disk
 
         if (
             node.get_requested_cores() > available_cores

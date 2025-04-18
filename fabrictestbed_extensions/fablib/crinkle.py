@@ -6,6 +6,7 @@ import logging
 import enum
 import shutil
 import time
+import random
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,7 @@ from fabrictestbed_extensions.fablib.interface import Interface
 from fabrictestbed_extensions.fablib.network_service import NetworkService
 from fabrictestbed_extensions.fablib.node import Node
 from fabrictestbed_extensions.fablib.slice import Slice
+from fabrictestbed_extensions.fablib.site import Site, Host
 
 CAPERSTART = "./caper/caper.byte -q -p -e"
 PCAPDIR = "/home/ubuntu/pcaps/"
@@ -831,6 +833,8 @@ class CrinkleSlice(Slice):
         if (allocate_hosts):
             allocated = {}
             logging.info("Allocating Monitors and their connected Nodes to different worker hosts")
+            sitenames_to_sites: dict[str, Site] = {}
+            sitenames_to_hosts: dict[str, dict[str, Host]] = {}
             for _, monitor in self.monitors.items():
                 logging.info(f"Allocating Monitor for network {monitor.data.net_name}")
                 if monitor.data.net_type == "L2Bridge":
@@ -838,33 +842,36 @@ class CrinkleSlice(Slice):
                     endpoint2 = self.get_node(name=monitor.creation_data[1][0])
                     endpoints = [endpoint1, endpoint2]
                     fablib = self.get_fablib_manager()
-                    site = fablib.get_resources().get_site(endpoint1.get_site())
-                    hosts = site.get_hosts()
+                    sitename = endpoint1.get_site()
+                    site = sitenames_to_sites.setdefault(sitename, fablib.get_resources().get_site(sitename))
+                    hosts = sitenames_to_hosts.setdefault(sitename, site.get_hosts())
+                    hostlist = list(hosts.items())
+                    random.shuffle(hostlist)
                     endhosts = {}
                     for endpoint in endpoints:
                         if endpoint.get_host() is not None:
                             endhosts.setdefault(endpoint.get_host(), True)
                             continue
                         foundhost = False
-                        for host in hosts.values():
-                            allocated_comps = allocated.setdefault(host.get_name(), {})
+                        for hostname, host in hostlist:
+                            allocated_comps = allocated.setdefault(hostname, {})
                             if fablib._FablibManager__can_allocate_node_in_host(
                                 host=host, node=endpoint, allocated=allocated_comps, site=site)[0]:
-                                endpoint.set_host(host_name=host.get_name())
-                                endhosts.setdefault(host.get_name(), True)
+                                endpoint.set_host(host_name=hostname)
+                                endhosts.setdefault(hostname, True)
                                 foundhost = True
-                                logging.info(f'Node {endpoint.get_name()} assigned to {host.get_name()}')
+                                logging.info(f'Node {endpoint.get_name()} assigned to {hostname}')
                                 break
                         if not foundhost:
                             raise Exception(f"Could not place node {endpoint.get_name()}")
-                    for host in hosts.values():
-                        if host.get_name() in endhosts:
+                    for hostname, host in hostlist:
+                        if hostname in endhosts:
                             continue
-                        allocated_comps = allocated.setdefault(host.get_name(), {})
+                        allocated_comps = allocated.setdefault(hostname, {})
                         if fablib._FablibManager__can_allocate_node_in_host(
                             host=host, node=monitor, allocated=allocated_comps, site=site)[0]:
-                            monitor.set_host(host_name=host.get_name())
-                            logging.info(f'Node {monitor.get_name()} assigned to {host.get_name()}')
+                            monitor.set_host(host_name=hostname)
+                            logging.info(f'Node {monitor.get_name()} assigned to {hostname}')
                             break
                     if monitor.get_host() is None:
                         raise Exception(f"Could not place monitor for network {monitor.data.net_name}")
