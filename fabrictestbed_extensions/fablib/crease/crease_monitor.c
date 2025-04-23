@@ -49,30 +49,6 @@ static inline uint64_t timespec64_to_ns(const struct timespec *ts)
 	return ((uint64_t) ts->tv_sec * NSEC_PER_SEC) + ts->tv_nsec;
 }
 
-static struct timeval
-ns_to_timeval(int64_t nsec)
-{
-	struct timespec t_spec = {0, 0};
-	struct timeval t_eval = {0, 0};
-	int32_t rem;
-
-	if (nsec == 0)
-		return t_eval;
-	rem = nsec % NSEC_PER_SEC;
-	t_spec.tv_sec = nsec / NSEC_PER_SEC;
-
-	if (rem < 0) {
-		t_spec.tv_sec--;
-		rem += NSEC_PER_SEC;
-	}
-
-	t_spec.tv_nsec = rem;
-	t_eval.tv_sec = t_spec.tv_sec;
-	t_eval.tv_usec = t_spec.tv_nsec / 1000;
-
-	return t_eval;
-}
-
 /* basicfwd.c: Basic DPDK skeleton forwarding example. */
 static uint64_t measures[16];
 unsigned char ana_headers[64];
@@ -246,42 +222,51 @@ swap_endian_long(uint64_t value) {
 static inline void
 crinkle_forward(
 	struct rte_mbuf **bufs,
-	char **c_plds,
+	uint8_t **c_plds,
 	const uint16_t nb_pkts,
 	const uint64_t systime_ns,
 	const uint64_t port)
 {
 	for (int i = 0; i < nb_pkts; ++i) {
 		struct rte_mbuf *buf = bufs[i];
-		char *c_pld = c_plds[i];
+		uint8_t *c_pld = c_plds[i];
 		uint32_t *candidate_trailer_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
-		uint32_t candidate_trailer = swap_endian(*candidate_trailer_ptr);
+		uint32_t candidate_trailer = *candidate_trailer_ptr;
+		uint32_t ts_lower = *(candidate_trailer_ptr-2);
+		if (lendian) {
+			candidate_trailer = swap_endian(candidate_trailer);
+			ts_lower = swap_endian(ts_lower);
+		}
 
 		// If the packet already has a UID trailer
-		if ((candidate_trailer & 0x0000FFFF) == MONPROT && (candidate_trailer >> 16) == buf->data_len-16) {
+		if ((candidate_trailer & 0x0000FFFF) == MONPROT && (candidate_trailer >> 16) == (ts_lower & 0x0000FFFF)) {
 			uint64_t time = systime_ns + i;
 			if (lendian) time = swap_endian_long(time);
-			rte_mov15_or_less(c_pld, (char *)&time, 8);
-			rte_mov16(c_pld+8, (char *)candidate_trailer_ptr - 12);
-			char * buf_start = rte_pktmbuf_mtod(buf, char*);
+			rte_mov15_or_less(c_pld-1, (uint8_t *)(&buf->data_len), 1);
+			rte_mov15_or_less(c_pld-2, (uint8_t *)(&buf->data_len) + 1, 1);
+			rte_mov15_or_less(c_pld, (uint8_t *)&time, 8);
+			rte_mov16(c_pld+8, (uint8_t *)candidate_trailer_ptr - 12);
+			uint8_t * buf_start = rte_pktmbuf_mtod(buf, uint8_t*);
 			rte_mov64(c_pld+24, buf_start);
 			rte_mov16(c_pld+88, buf_start+64);
 		}
 		else {
 			uint64_t uid_trailer[2];
 			uid_trailer[0] = systime_ns + i;
-			uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uint64_t)(buf->data_len) << 16) + MONPROT;
+			uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uid_trailer[0] << 16) & 0x00000000FFFF0000) + MONPROT;
 			if (lendian) {
 				uid_trailer[0] = swap_endian_long(uid_trailer[0]);
 				uid_trailer[1] = swap_endian_long(uid_trailer[1]);
 			}
 			
-			char *trailer = rte_pktmbuf_append(buf, 16);
-			rte_mov16(trailer, (char *)uid_trailer);
+			uint8_t *trailer = (uint8_t *)rte_pktmbuf_append(buf, 16);
+			rte_mov16(trailer, (uint8_t *)uid_trailer);
 
-			rte_mov15_or_less(c_pld, (char *)&uid_trailer[0], 8);
-			rte_mov16(c_pld+8, (char *)uid_trailer);
-			char * buf_start = rte_pktmbuf_mtod(buf, char*);
+			rte_mov15_or_less(c_pld-1, (uint8_t *)(&buf->data_len), 1);
+			rte_mov15_or_less(c_pld-2, (uint8_t *)(&buf->data_len) + 1, 1);
+			rte_mov15_or_less(c_pld, (uint8_t *)&uid_trailer[0], 8);
+			rte_mov16(c_pld+8, (uint8_t *)uid_trailer);
+			uint8_t * buf_start = rte_pktmbuf_mtod(buf, uint8_t*);
 			rte_mov64(c_pld+24, buf_start);
 			rte_mov16(c_pld+88, buf_start+64);
 		}
@@ -321,7 +306,7 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t ports[])
 
 	// Tests for little endian memory, since we must write to packet
 	// buffers values in big-endian format
-	const int num = 1;
+	int num = 1;
 	if (*(char *)&num == 1) {
         lendian = true;
     }
@@ -331,11 +316,11 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t ports[])
 	if (retval != 0) {
 		printf("Failed to allocate clone bufs: Code %i\n", retval);
 	}
-	char *c_plds[BURST_SIZE];
+	uint8_t *c_plds[BURST_SIZE];
 	// Clone addresses will always be the same, so keep constant
 	for (int i = 0; i < BURST_SIZE; ++i) {
 		struct rte_mbuf *cbuf = clone_bufs[i];
-		char *c = rte_pktmbuf_append(cbuf, 64+16+80);
+		uint8_t *c = (uint8_t *)rte_pktmbuf_append(cbuf, 64+16+80);
 		rte_mov64(c, ana_headers);
 		c_plds[i] = c + 56;
 	}
@@ -431,7 +416,6 @@ main(int argc, char *argv[])
 	nb_ports = rte_eth_dev_count_avail();
 	
 	int arg;
-	char *argval;
 	uint16_t ports[nb_ports];
 	bool set_mon_id = false;
 	bool set_macs = false;
@@ -521,8 +505,8 @@ main(int argc, char *argv[])
 	if (!set_mon_id) {
 		rte_exit(EXIT_FAILURE, "Did not set monitor id.\n");
 	}
-	for (int i = 0; i < nb_ports; ++i) {
-		if (ports[i] >= nb_ports || ports[i] < 0) {
+	for (uint16_t i = 0; i < nb_ports; ++i) {
+		if (ports[i] >= nb_ports) {
 			rte_exit(EXIT_FAILURE, "Invalid port mapping for virtual port %hu: %hu.\n", i, ports[i]);
 		}
 	}
