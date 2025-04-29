@@ -33,9 +33,8 @@ PCAPDIR = "/home/ubuntu/pcaps/"
 LOCALP4DIR = "."
 REMOTEWORKDIR = ".crinkle"
 CREASEDIR = "fabrictestbed-extensions/fabrictestbed_extensions/fablib/crease"
-SWITCHPREFIX = "~/bmv2-remote-attestation/targets/simple_switch/"
-MONITORURL = "https://transparnet.cs.iit.edu/~awolosewicz/crease_monitor-static"
-DPDKNAME = "crease_monitor-static"
+MONITORURL = "https://transparnet.cs.iit.edu/~awolosewicz/dpdk-crease_monitor"
+DPDKNAME = "dpdk-crease_monitor"
 
 TCPDUMP_IMAGES = ["default_ubuntu_20",
                   "default_ubuntu_22",
@@ -901,27 +900,12 @@ class CrinkleSlice(Slice):
         self.cnets[site]=self.analyzer_cnet
         jobs: list[futures.Future] = []
         counter = 0
-        spade_commands = ""
-        if site == "EDUKY":
-            spade_commands += """sudo bash -c 'echo "2600:2701:5000:5001::6c9d:8e76 neo4j.com" >> /etc/hosts';"""
-        spade_commands += (f'mkdir {REMOTEWORKDIR};'
-                          'git clone https://github.com/ashish-gehani/SPADE.git;'
-                          'sudo add-apt-repository -y ppa:openjdk-r/ppa; sudo apt-get update; sudo apt-get install -y openjdk-11-jdk;'
-                          'sudo apt-get install -y auditd bison clang cmake curl flex fuse git ifupdown libaudit-dev libfuse-dev linux-headers-`uname -r` lsof pkg-config unzip uthash-dev wget;'
-                          'sudo apt-get install -y graphviz python3-scapy;'
-                          'cd SPADE; ./configure; make;'
-                        )
-        spade_job = self.analyzer.execute_thread(spade_commands)
         self.monitor_string = f"{self.analyzer_iface.get_device_name()} "
         for key, monitor in self.monitors.items():
             logging.info(f"Refreshing monitor for net {key} after slice creation, count {counter}")
             refreshed_monitor = self.get_monitor(monitor.get_name())
             mon_site = refreshed_monitor.get_site()
-            jobs.append(refreshed_monitor.execute_thread("sudo apt update; sudo apt install -y python3-scapy\n"
-                                                         "sudo apt install -y --no-install-recommends libibverbs-dev linux-image-generic jq\n"
-                                                         "sudo sed -i 's/GRUB_CMDLINE_LINUX=\"\"/GRUB_CMDLINE_LINUX=\"default_hugepagesz=1G hugepagesz=1G hugepages=2s\"/' /etc/default/grub\n"
-                                                         "sudo grub-mkconfig -o /boot/grub/grub.cfg; sudo update-grub\n"
-                                                         f"wget -q {MONITORURL}; chmod u+x {DPDKNAME}"))
+            jobs.append(refreshed_monitor.execute_thread(f"wget -q -P {REMOTEWORKDIR} {MONITORURL}; chmod u+x {REMOTEWORKDIR}/{DPDKNAME}"))
             if self.cnets[mon_site] is None or not self.cnets[mon_site].is_instantiated():
                 self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_net_{mon_site}")
             refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_net_{mon_site}")
@@ -972,19 +956,16 @@ class CrinkleSlice(Slice):
             monitor.execute("sudo reboot")
         logging.info(f"Waiting on Crinkle monitors to finish reboot")
         self.wait_ssh(progress=True)
-        logging.info(f'Waiting on Crinkle analyzer SPADE install to finish')
-        print("Waiting on Crinkle analyzer SPADE install to finish")
-        futures.wait([spade_job])
         logging.info(f'Starting SPADE')
-        self.analyzer.execute_thread('./SPADE/bin/spade debug')
+        self.analyzer.execute_thread(f'./{REMOTEWORKDIR}/SPADE/bin/spade debug')
         time.sleep(5)
         spade_control_commands = ('add reporter DSL /home/ubuntu/spade_pipe\n'
                                   'add analyzer CommandLine\n'
                                   'add storage Neo4j database=/home/ubuntu/spade_database\n')
-        self.analyzer.execute(f'echo -e "{spade_control_commands}" | ./SPADE/bin/spade control', quiet=True)
-        self.analyzer.upload_file(f"{CREASEDIR}/spade_reader.py", "spade_reader.py")
-        self.analyzer.execute("sudo chmod u+x spade_reader.py")
-        self.analyzer.execute_thread(f"sudo ./spade_reader.py {self.monitor_string}")
+        self.analyzer.execute(f'echo -e "{spade_control_commands}" | ./{REMOTEWORKDIR}/SPADE/bin/spade control', quiet=True)
+        self.analyzer.upload_file(f"{CREASEDIR}/spade_reader.py", f"{REMOTEWORKDIR}/spade_reader.py")
+        self.analyzer.execute(f"sudo chmod u+x {REMOTEWORKDIR}/spade_reader.py")
+        self.analyzer.execute_thread(f"sudo ./{REMOTEWORKDIR}/spade_reader.py {self.monitor_string}")
         logging.info(f"Crinkle post_boot_config done")
         print("Crinkle post_boot_config done")
 
@@ -1187,7 +1168,7 @@ class CrinkleSlice(Slice):
         else:
             graph_build += '''\\$graph1 = \\$graph0\n'''
         graph_build += f'''\\$graph2 = \\$graph1.getLineage(\\$graph1.getVertex({spade_filter}), 1, 'b')\n\\$graph3 = \\$graph2 + \\$base.getPath(\\$graph2.getVertex(\\"type\\" == 'Process'), \\$base.getVertex(\\"type\\" == 'Agent'), 1)'''
-        self.analyzer.execute(f'echo -e "set storage Neo4j\n{graph_build}\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$graph3" | ./SPADE/bin/spade query; '
+        self.analyzer.execute(f'echo -e "set storage Neo4j\n{graph_build}\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$graph3" | ./{REMOTEWORKDIR}/SPADE/bin/spade query; '
                                 f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg', quiet=quiet)
         self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
 
@@ -1195,8 +1176,8 @@ class CrinkleSlice(Slice):
         """
         Reset the analyzer, wiping the database.
         """
-        self.analyzer.execute(f'''sudo killall python3; echo -e "remove storage Neo4j\n" | ./SPADE/bin/spade control; rm -rf spade_database/; echo -e "add storage Neo4j database=/home/ubuntu/spade_database\n" | ./SPADE/bin/spade control''', quiet=quiet)
-        self.analyzer.execute_thread(f'sudo ./spade_reader.py {self.monitor_string}')
+        self.analyzer.execute(f'''sudo killall python3; echo -e "remove storage Neo4j\n" | ./{REMOTEWORKDIR}/SPADE/bin/spade control; rm -rf {REMOTEWORKDIR}/spade_database/; echo -e "add storage Neo4j database=/home/ubuntu/{REMOTEWORKDIR}/spade_database\n" | ./{REMOTEWORKDIR}/SPADE/bin/spade control''', quiet=quiet)
+        self.analyzer.execute_thread(f'sudo ./{REMOTEWORKDIR}/spade_reader.py {self.monitor_string}')
     
     def start_monitor(self, monitor: CrinkleMonitor, wait: bool=True, quiet: bool=False) -> futures.Future | None:
         """
@@ -1216,9 +1197,9 @@ class CrinkleSlice(Slice):
         logging.info(f"Starting Crinkle monitor {monitor.data.net_name}")
         job = None
         if wait:
-            monitor.execute(f"sudo ./{DPDKNAME} -- {monitor.data.cmd_args} &", quiet=quiet)
+            monitor.execute(f"sudo ./{REMOTEWORKDIR}/{DPDKNAME} -- {monitor.data.cmd_args} &", quiet=quiet)
         else:
-            job = monitor.execute_thread(f"sudo ./{DPDKNAME} -- {monitor.data.cmd_args}")
+            job = monitor.execute_thread(f"sudo ./{REMOTEWORKDIR}/{DPDKNAME} -- {monitor.data.cmd_args}")
         return job
         
     def start_all_monitors(self, wait: bool=True, no_return: bool=True) -> list[futures.Future] | None:
