@@ -211,7 +211,13 @@ class Interface:
         else:
             node_name = None
 
-        if self.get_node() and str(self.get_node().get_reservation_state()) == "Active":
+        from fabrictestbed_extensions.fablib.node import Node
+
+        if (
+            self.get_node()
+            and isinstance(self.get_node(), Node)
+            and str(self.get_node().get_reservation_state()) == "Active"
+        ):
             mac = str(self.get_mac())
             physical_dev = str(self.get_physical_os_interface_name())
             dev = str(self.get_device_name())
@@ -423,7 +429,7 @@ class Interface:
 
                 fablib_data["base_dev"] = os_iface
 
-                if os_iface and vlan:
+                if os_iface and vlan and not self.__is_shared_nic():
                     os_iface = f"{os_iface}.{vlan}"
 
                 fablib_data["dev"] = os_iface
@@ -521,7 +527,7 @@ class Interface:
 
         NOTE: Not intended for API use
         """
-        if self.get_vlan() is not None:
+        if self.get_vlan() is not None and not self.___is_shared_nic():
             self.get_node().add_vlan_os_interface(
                 os_iface=self.get_physical_os_interface_name(),
                 vlan=self.get_vlan(),
@@ -642,6 +648,15 @@ class Interface:
         if_capacities.bw = int(bw)
         self.get_fim().set_properties(capacities=if_capacities)
 
+        if (
+            self.get_fim().get_peers()
+            and self.get_fim().get_peers()[0]
+            and self.get_fim().get_peers()[0].capacities
+        ):
+            existing = self.get_fim().get_peers()[0].capacities
+            existing.bw = int(bw)
+            self.get_fim().get_peers()[0].set_properties(capacities=existing)
+
         return self
 
     def get_fim_interface(self) -> FimInterface:
@@ -667,10 +682,29 @@ class Interface:
         :return: bandwith
         :rtype: String
         """
-        if self.get_component() and self.get_component().get_model() == "NIC_Basic":
-            return 100
-        elif self.get_fim() and self.get_fim().capacities:
-            return self.get_fim().capacities.bw
+        bw = 0
+        if (
+            self.get_fim()
+            and self.get_fim().capacities
+            and self.get_fim().capacities.bw
+        ):
+            bw = self.get_fim().capacities.bw
+        if (
+            not bw
+            and self.get_fim()
+            and self.get_fim().get_peers()
+            and self.get_fim().get_peers()[0]
+            and self.get_fim().get_peers()[0].capacities
+            and self.get_fim().get_peers()[0].capacities.bw
+        ):
+            bw = self.get_fim().get_peers()[0].capacities.bw
+        if (
+            not bw
+            and self.get_component()
+            and self.get_component().get_model() == "NIC_Basic"
+        ):
+            bw = 100
+        return bw
 
     def get_vlan(self) -> str:
         """
@@ -1392,3 +1426,8 @@ class Interface:
         """
         if self.get_fim():
             return self.get_fim().type
+
+    def __is_shared_nic(self) -> bool:
+        if self.get_fim() and str(self.get_fim().type) == "SharedPort":
+            return True
+        return False

@@ -9,11 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 1.8.2 - TODO
 
 ### Fixed
+- Display Slice owner information (Issue [#409](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/409))
 - Non cloud facility ports should report local_name just like cloud facility ports (Issue [#402](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/402))
 - urllib3 deprecated warning (Issue [#397](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/397))
 - Improvements for get_interfaces and get_components (Issue [#378](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/378))
 - TypeError: Switch.get_interfaces() got an unexpected keyword argument 'output' (Issue([#405](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/405)))
 - Exception: Interface not found using Node.get_interface(name) (Issue[#407](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/407))
+- Delete Facility port from a slice (Issue [#411](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/411))
+- Disable Config VLAN interfaces for SharedPort (Issue [#413](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/413))
+- Modify interface bw does not pass bw to network service (Issue [#415](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/415))
 
 ### Added
 - Add support for BlueField NICs (Issue [#399](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/399))
