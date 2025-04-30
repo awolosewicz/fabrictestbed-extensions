@@ -826,13 +826,13 @@ class CrinkleSlice(Slice):
         if self.analyzer is None:
             raise Exception(f"Analyzer must be added before Crinkle slice submission using add_analyzer()")
         
-        allocated = {}
-        logging.info("Allocating Monitors and their connected Nodes to different worker hosts")
-        sitenames_to_sites: dict[str, Site] = {}
-        sitenames_to_hosts: dict[str, dict[str, Host]] = {}
-        fablib = self.get_fablib_manager()
-        fabresources = fablib.get_resources()
         if (self.do_allocate_hosts):
+            allocated = {}
+            logging.info("Allocating Monitors and their connected Nodes to different worker hosts")
+            sitenames_to_sites: dict[str, Site] = {}
+            sitenames_to_hosts: dict[str, dict[str, Host]] = {}
+            fablib = self.get_fablib_manager()
+            fabresources = fablib.get_resources()
             for _, monitor in self.monitors.items():
                 logging.info(f"Allocating Monitor for network {monitor.data.net_name}")
                 if monitor.data.net_type == "L2Bridge":
@@ -873,7 +873,7 @@ class CrinkleSlice(Slice):
                     if monitor.get_host() is None:
                         raise Exception(f"Could not place monitor for network {monitor.data.net_name}")
                 self.do_allocate_hosts = False
-        logging.info("Hosts allocated")
+            logging.info("Hosts allocated")
         
         return super().submit(wait=wait, wait_timeout=wait_timeout, wait_interval=wait_interval, progress=progress, wait_jupyter=wait_jupyter, post_boot_config=post_boot_config, wait_ssh=wait_ssh,
                        extra_ssh_keys=extra_ssh_keys, lease_start_time=lease_start_time, lease_end_time=lease_end_time, lease_in_hours=lease_in_hours, validate=validate)
