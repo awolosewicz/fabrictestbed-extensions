@@ -320,6 +320,7 @@ class CrinkleSlice(Slice):
         self.monitor_string = None
         self.probe_id = 0
         self.do_allocate_hosts = True
+        self.did_post_boot = False
 
     @staticmethod
     def new_slice(
@@ -360,6 +361,7 @@ class CrinkleSlice(Slice):
             self.analyzer_name = data["analyzer_name"]
             self.prefix = data["prefix"]
             self.monitor_string = data["monitor_string"]
+            self.did_post_boot = data["did_post_boot"]
             logging.info(f"Retrieved crinkle slice config as:\n{self.analyzer_name}\n{self.prefix}\n{self.monitor_string}")
         else:
             logging.info(f"Did not retrieve stored crinkle slice config")
@@ -373,7 +375,8 @@ class CrinkleSlice(Slice):
         data_dict = {
             "analyzer_name": self.analyzer_name,
             "prefix": self.prefix,
-            "monitor_string": self.monitor_string
+            "monitor_string": self.monitor_string,
+            "did_post_boot": self.did_post_boot
         }
         logging.info(f"Writing crinkle slice config to user data: {data_dict}")
         user_data["crinkle_slice_config"] = data_dict
@@ -893,81 +896,91 @@ class CrinkleSlice(Slice):
         """
         super().post_boot_config()
         logging.info(f"Crinkle post_boot_config")
-        self.analyzer = self.get_node(name=self.analyzer_name)
-        site = self.analyzer.get_site()
-        self.analyzer_cnet = self.get_l3network(name=f"{self.prefix}_net_{site}")
-        self.analyzer_iface = self.analyzer.get_interface(network_name=self.analyzer_cnet.get_name())
-        self.cnets[site]=self.analyzer_cnet
-        jobs: list[futures.Future] = []
-        counter = 0
-        self.monitor_string = f"{self.analyzer_iface.get_device_name()} "
-        for key, monitor in self.monitors.items():
-            logging.info(f"Refreshing monitor for net {key} after slice creation, count {counter}")
-            refreshed_monitor = self.get_monitor(monitor.get_name())
-            mon_site = refreshed_monitor.get_site()
-            jobs.append(refreshed_monitor.execute_thread(f"sudo ip link set {self.analyzer_iface.get_device_name()} up; wget -q -P {REMOTEWORKDIR} {MONITORURL}; chmod u+x {REMOTEWORKDIR}/{DPDKNAME}"))
-            if self.cnets[mon_site] is None or not self.cnets[mon_site].is_instantiated():
-                self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_net_{mon_site}")
-            refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_net_{mon_site}")
-            ordered_devs = {}
-            ctr = 0
-            # Need a way to know where a specific interface falls *in the OS ordering of them*
-            # Such as, if an interface is device enp8s0, and OS has enp7s0, enp8s0, enp9s0, return 1
-            # And because this isn't consistent per site, cannot assume enp7s0 is first
-            for entry in refreshed_monitor.get_dataplane_os_interfaces():
-                ordered_devs[entry['ifname']] = ctr
-                ctr += 1
-            refreshed_monitor.data.cmd_args += f"-n {refreshed_monitor.data.monitor_id} "
-            refreshed_monitor.data.cmd_args += f"-m {refreshed_monitor.data.cnet_iface.get_mac()} -m {self.analyzer_iface.get_mac()} "
-            refreshed_monitor.data.cmd_args += f"-i {refreshed_monitor.data.cnet_iface.get_ip_addr()} -i {self.analyzer_iface.get_ip_addr()} "
-            dev_name = refreshed_monitor.data.cnet_iface.get_device_name()
-            refreshed_monitor.data.cmd_args += f"-d {refreshed_monitor.data.port_nums}@{ordered_devs[dev_name]} "
-            refreshed_monitor.data.port_nums += 1
-            self.monitor_string += f'{refreshed_monitor.data.monitor_id} '
-            for data in monitor.creation_data:
-                logging.info(f"Initializing monitor after slice creation with data: {data}")
-                mon_iface = refreshed_monitor.get_component(name=data[MonNetData.MIFACENAME]).get_interfaces()[0]
-                dev_name = mon_iface.get_device_name()
+        if not self.did_post_boot:
+            self.analyzer = self.get_node(name=self.analyzer_name)
+            site = self.analyzer.get_site()
+            self.analyzer_cnet = self.get_l3network(name=f"{self.prefix}_net_{site}")
+            self.analyzer_iface = self.analyzer.get_interface(network_name=self.analyzer_cnet.get_name())
+            self.cnets[site]=self.analyzer_cnet
+            jobs: list[futures.Future] = []
+            counter = 0
+            self.monitor_string = f"{self.analyzer_iface.get_device_name()} "
+            for key, monitor in self.monitors.items():
+                logging.info(f"Refreshing monitor for net {key} after slice creation, count {counter}")
+                refreshed_monitor = self.get_monitor(monitor.get_name())
+                mon_site = refreshed_monitor.get_site()
+                jobs.append(refreshed_monitor.execute_thread(f"sudo ip link set {self.analyzer_iface.get_device_name()} up; wget -q -P {REMOTEWORKDIR} {MONITORURL}; chmod u+x {REMOTEWORKDIR}/{DPDKNAME}"))
+                if self.cnets[mon_site] is None or not self.cnets[mon_site].is_instantiated():
+                    self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_net_{mon_site}")
+                refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_net_{mon_site}")
+                ordered_devs = {}
+                ctr = 0
+                # Need a way to know where a specific interface falls *in the OS ordering of them*
+                # Such as, if an interface is device enp8s0, and OS has enp7s0, enp8s0, enp9s0, return 1
+                # And because this isn't consistent per site, cannot assume enp7s0 is first
+                for entry in refreshed_monitor.get_dataplane_os_interfaces():
+                    ordered_devs[entry['ifname']] = ctr
+                    ctr += 1
+                refreshed_monitor.data.cmd_args += f"-n {refreshed_monitor.data.monitor_id} "
+                refreshed_monitor.data.cmd_args += f"-m {refreshed_monitor.data.cnet_iface.get_mac()} -m {self.analyzer_iface.get_mac()} "
+                refreshed_monitor.data.cmd_args += f"-i {refreshed_monitor.data.cnet_iface.get_ip_addr()} -i {self.analyzer_iface.get_ip_addr()} "
+                dev_name = refreshed_monitor.data.cnet_iface.get_device_name()
                 refreshed_monitor.data.cmd_args += f"-d {refreshed_monitor.data.port_nums}@{ordered_devs[dev_name]} "
-                refreshed_monitor.data.iface_mappings[data[MonNetData.IFACENAME]] = (
-                    data[MonNetData.NODENAME], mon_iface, data[MonNetData.ISSINK], refreshed_monitor.data.port_nums)
-                self.monitor_string += f'{refreshed_monitor.data.port_nums}@{data[MonNetData.IFACENAME]} '
                 refreshed_monitor.data.port_nums += 1
+                self.monitor_string += f'{refreshed_monitor.data.monitor_id} '
+                for data in monitor.creation_data:
+                    logging.info(f"Initializing monitor after slice creation with data: {data}")
+                    mon_iface = refreshed_monitor.get_component(name=data[MonNetData.MIFACENAME]).get_interfaces()[0]
+                    dev_name = mon_iface.get_device_name()
+                    refreshed_monitor.data.cmd_args += f"-d {refreshed_monitor.data.port_nums}@{ordered_devs[dev_name]} "
+                    refreshed_monitor.data.iface_mappings[data[MonNetData.IFACENAME]] = (
+                        data[MonNetData.NODENAME], mon_iface, data[MonNetData.ISSINK], refreshed_monitor.data.port_nums)
+                    self.monitor_string += f'{refreshed_monitor.data.port_nums}@{data[MonNetData.IFACENAME]} '
+                    refreshed_monitor.data.port_nums += 1
+                self.monitor_string += ' '
+                self.monitors[key] = refreshed_monitor
+                refreshed_monitor.set_monitor_data()
+                counter += 1
+            self.monitor_string = self.monitor_string.rstrip()
+            logging.info(f"Crinkle post_boot_config waiting on jobs to finish")
+            print("Configuring Crinkle Resources")
+            ctr = 0
+            for _ in futures.as_completed(jobs):
+                ctr += 1
+                logging.info(f'{ctr}/{len(jobs)} jobs finished')
+                print(f'{ctr}/{len(jobs)} jobs finished')
+            logging.info(f"Saving Crinkle Data")
+            self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
+            self.update()
+            logging.info(f"Rebooting Crinkle monitors")
+            print("Rebooting Crinkle Resources")
+            for monitor in self.monitors.values():
+                monitor.execute("sudo reboot")
+            logging.info(f"Waiting on Crinkle monitors to finish reboot")
+            self.wait_ssh(progress=True)
+            jobs = []
+            logging.info(f"Enabling Crinkle monitor interfaces")
+            for monitor in self.monitors.values():
                 jobs.append(refreshed_monitor.execute_thread(f'sudo ip link set {dev_name} up; sudo ip link set {dev_name} promisc on'))
-            self.monitor_string += ' '
-            self.monitors[key] = refreshed_monitor
-            refreshed_monitor.set_monitor_data()
-            counter += 1
-        self.monitor_string = self.monitor_string.rstrip()
-        self.set_crinkle_data()
-        logging.info(f"Crinkle post_boot_config waiting on jobs to finish")
-        print("Configuring Crinkle Resources")
-        ctr = 0
-        for _ in futures.as_completed(jobs):
-            ctr += 1
-            logging.info(f'{ctr}/{len(jobs)} jobs finished')
-            print(f'{ctr}/{len(jobs)} jobs finished')
-        logging.info(f"Saving Crinkle Data")
-        self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
-        self.update()
-        logging.info(f"Rebooting Crinkle monitors")
-        print("Rebooting Crinkle Resources")
-        for monitor in self.monitors.values():
-            monitor.execute("sudo reboot")
-        logging.info(f"Waiting on Crinkle monitors to finish reboot")
-        self.wait_ssh(progress=True)
-        logging.info(f'Starting SPADE')
-        self.analyzer.execute_thread(f'./{REMOTEWORKDIR}/SPADE/bin/spade debug')
-        time.sleep(5)
-        spade_control_commands = ('add reporter DSL /home/ubuntu/spade_pipe\n'
-                                  'add analyzer CommandLine\n'
-                                  'add storage Neo4j database=/home/ubuntu/spade_database\n')
-        self.analyzer.execute(f'echo -e "{spade_control_commands}" | ./{REMOTEWORKDIR}/SPADE/bin/spade control', quiet=True)
-        self.analyzer.upload_file(f"{CREASEDIR}/spade_reader.py", f"{REMOTEWORKDIR}/spade_reader.py")
-        self.analyzer.execute(f"sudo chmod u+x {REMOTEWORKDIR}/spade_reader.py")
-        self.analyzer.execute_thread(f"sudo ./{REMOTEWORKDIR}/spade_reader.py {self.monitor_string}")
-        logging.info(f"Crinkle post_boot_config done")
-        print("Crinkle post_boot_config done")
+            ctr = 0
+            for _ in futures.as_completed(jobs):
+                ctr += 1
+                logging.info(f'{ctr}/{len(jobs)} jobs finished')
+                print(f'{ctr}/{len(jobs)} jobs finished')
+            logging.info(f'Starting SPADE')
+            self.analyzer.execute_thread(f'./{REMOTEWORKDIR}/SPADE/bin/spade debug')
+            time.sleep(5)
+            spade_control_commands = ('add reporter DSL /home/ubuntu/spade_pipe\n'
+                                    'add analyzer CommandLine\n'
+                                    'add storage Neo4j database=/home/ubuntu/spade_database\n')
+            self.analyzer.execute(f'echo -e "{spade_control_commands}" | ./{REMOTEWORKDIR}/SPADE/bin/spade control', quiet=True)
+            self.analyzer.upload_file(f"{CREASEDIR}/spade_reader.py", f"{REMOTEWORKDIR}/spade_reader.py")
+            self.analyzer.execute(f"sudo chmod u+x {REMOTEWORKDIR}/spade_reader.py")
+            self.analyzer.execute_thread(f"sudo ./{REMOTEWORKDIR}/spade_reader.py {self.monitor_string}")
+            logging.info(f"Crinkle post_boot_config done")
+            print("Crinkle post_boot_config done")
+            self.did_post_boot = True
+            self.set_crinkle_data()
 
     @staticmethod
     def mac_to_int(mac: str):
