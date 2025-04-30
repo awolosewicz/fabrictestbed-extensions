@@ -556,7 +556,7 @@ class Slice:
 
         if (
             "nodes" not in skip
-            and "components" not in skip
+            or "components" not in skip
         ):
             nodes = self.get_nodes()   
 
