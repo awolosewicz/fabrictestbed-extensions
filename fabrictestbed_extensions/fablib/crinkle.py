@@ -31,7 +31,7 @@ from fabrictestbed_extensions.fablib.site import Site, Host
 CAPERSTART = "./caper/caper.byte -q -p -e"
 PCAPDIR = "/home/ubuntu/pcaps/"
 LOCALP4DIR = "."
-REMOTEWORKDIR = ".crinkle"
+REMOTEWORKDIR = ".crease"
 CREASEDIR = "fabrictestbed-extensions/fabrictestbed_extensions/fablib/crease"
 MONITORURL = "https://transparnet.cs.iit.edu/~awolosewicz/dpdk-crease_monitor"
 DPDKNAME = "dpdk-crease_monitor"
@@ -51,7 +51,7 @@ class MonNetData(enum.IntEnum):
     PORTNUM = 4
 
 class CrinkleAnalyzer(Node):
-    default_image = "default_ubuntu_22"
+    default_image = "attestable_bmv2_v2_ubuntu_20"
 
     def __init__(
         self,
@@ -145,7 +145,7 @@ class CrinkleMonitor(Node):
     default_image = "attestable_bmv2_v2_ubuntu_20"
     default_cores = 2
     default_ram = 4
-    default_disk = 10
+    default_disk = 20
 
     class MonitorData():
         def __init__(
@@ -218,11 +218,8 @@ class CrinkleMonitor(Node):
             ram=CrinkleMonitor.default_ram,
             disk=CrinkleMonitor.default_disk
         )
-        
-        if site == "EDUKY":
-            monitor.set_image("default_ubuntu_22")
-        else:
-            monitor.set_image(CrinkleMonitor.default_image)
+
+        monitor.set_image(CrinkleMonitor.default_image)
 
         monitor.init_fablib_data()
 
@@ -322,6 +319,7 @@ class CrinkleSlice(Slice):
         self.monitor_count = 0
         self.monitor_string = None
         self.probe_id = 0
+        self.do_allocate_hosts = True
 
     @staticmethod
     def new_slice(
@@ -775,7 +773,6 @@ class CrinkleSlice(Slice):
         lease_end_time: datetime = None,
         lease_in_hours: int = None,
         validate: bool = False,
-        allocate_hosts: bool = True
     ) -> str:
         """
         Similarly to Slice.submit(), submits a slice request to FABRIC.
@@ -829,20 +826,21 @@ class CrinkleSlice(Slice):
         if self.analyzer is None:
             raise Exception(f"Analyzer must be added before Crinkle slice submission using add_analyzer()")
         
-        if (allocate_hosts):
-            allocated = {}
-            logging.info("Allocating Monitors and their connected Nodes to different worker hosts")
-            sitenames_to_sites: dict[str, Site] = {}
-            sitenames_to_hosts: dict[str, dict[str, Host]] = {}
+        allocated = {}
+        logging.info("Allocating Monitors and their connected Nodes to different worker hosts")
+        sitenames_to_sites: dict[str, Site] = {}
+        sitenames_to_hosts: dict[str, dict[str, Host]] = {}
+        fablib = self.get_fablib_manager()
+        fabresources = fablib.get_resources()
+        if (self.do_allocate_hosts):
             for _, monitor in self.monitors.items():
                 logging.info(f"Allocating Monitor for network {monitor.data.net_name}")
                 if monitor.data.net_type == "L2Bridge":
                     endpoint1 = self.get_node(name=monitor.creation_data[0][0])
                     endpoint2 = self.get_node(name=monitor.creation_data[1][0])
                     endpoints = [endpoint1, endpoint2]
-                    fablib = self.get_fablib_manager()
                     sitename = endpoint1.get_site()
-                    site = sitenames_to_sites.setdefault(sitename, fablib.get_resources().get_site(sitename))
+                    site = sitenames_to_sites.setdefault(sitename, fabresources.get_site(sitename))
                     hosts = sitenames_to_hosts.setdefault(sitename, site.get_hosts())
                     hostlist = list(hosts.items())
                     random.shuffle(hostlist)
@@ -874,6 +872,8 @@ class CrinkleSlice(Slice):
                             break
                     if monitor.get_host() is None:
                         raise Exception(f"Could not place monitor for network {monitor.data.net_name}")
+                self.do_allocate_hosts = False
+        logging.info("Hosts allocated")
         
         return super().submit(wait=wait, wait_timeout=wait_timeout, wait_interval=wait_interval, progress=progress, wait_jupyter=wait_jupyter, post_boot_config=post_boot_config, wait_ssh=wait_ssh,
                        extra_ssh_keys=extra_ssh_keys, lease_start_time=lease_start_time, lease_end_time=lease_end_time, lease_in_hours=lease_in_hours, validate=validate)
@@ -948,7 +948,7 @@ class CrinkleSlice(Slice):
             logging.info(f'{ctr}/{len(jobs)} jobs finished')
             print(f'{ctr}/{len(jobs)} jobs finished')
         logging.info(f"Saving Crinkle Data")
-        self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False, allocate_hosts=False)
+        self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
         self.update()
         logging.info(f"Rebooting Crinkle monitors")
         print("Rebooting Crinkle Resources")
