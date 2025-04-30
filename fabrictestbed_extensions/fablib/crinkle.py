@@ -961,7 +961,11 @@ class CrinkleSlice(Slice):
             jobs = []
             logging.info(f"Enabling Crinkle monitor interfaces")
             for monitor in self.monitors.values():
-                jobs.append(refreshed_monitor.execute_thread(f'sudo ip link set {dev_name} up; sudo ip link set {dev_name} promisc on'))
+                cmd = f'sudo ip link set {monitor.data.cnet_iface.get_device_name()} up; sudo ip link set {monitor.data.cnet_iface.get_device_name()} promisc on; '
+                for (_, iface, _, _) in monitor.data.iface_mappings.values():
+                    dev_name = iface.get_device_name()
+                    cmd += f'sudo ip link set {dev_name} up; sudo ip link set {dev_name} promisc on; '
+                jobs.append(monitor.execute_thread(cmd.rstrip()))
             ctr = 0
             for _ in futures.as_completed(jobs):
                 ctr += 1
