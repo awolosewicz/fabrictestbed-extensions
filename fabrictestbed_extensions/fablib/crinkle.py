@@ -905,7 +905,7 @@ class CrinkleSlice(Slice):
             logging.info(f"Refreshing monitor for net {key} after slice creation, count {counter}")
             refreshed_monitor = self.get_monitor(monitor.get_name())
             mon_site = refreshed_monitor.get_site()
-            jobs.append(refreshed_monitor.execute_thread(f"wget -q -P {REMOTEWORKDIR} {MONITORURL}; chmod u+x {REMOTEWORKDIR}/{DPDKNAME}"))
+            jobs.append(refreshed_monitor.execute_thread(f"sudo ip link set {self.analyzer_iface.get_device_name()} up; wget -q -P {REMOTEWORKDIR} {MONITORURL}; chmod u+x {REMOTEWORKDIR}/{DPDKNAME}"))
             if self.cnets[mon_site] is None or not self.cnets[mon_site].is_instantiated():
                 self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_net_{mon_site}")
             refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_net_{mon_site}")
@@ -933,7 +933,7 @@ class CrinkleSlice(Slice):
                     data[MonNetData.NODENAME], mon_iface, data[MonNetData.ISSINK], refreshed_monitor.data.port_nums)
                 self.monitor_string += f'{refreshed_monitor.data.port_nums}@{data[MonNetData.IFACENAME]} '
                 refreshed_monitor.data.port_nums += 1
-                jobs.append(refreshed_monitor.execute_thread(f'sudo ifconfig {dev_name} promisc'))
+                jobs.append(refreshed_monitor.execute_thread(f'sudo ip link set {dev_name} up; sudo ip link set {dev_name} promisc on'))
             self.monitor_string += ' '
             self.monitors[key] = refreshed_monitor
             refreshed_monitor.set_monitor_data()
