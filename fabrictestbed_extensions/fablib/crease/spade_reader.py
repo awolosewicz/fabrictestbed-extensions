@@ -10,7 +10,7 @@ from scapy.layers.l2 import Ether
 from scapy.layers.inet import IP
 from scapy.layers.inet6 import IPv6, IPv6ExtHdrDestOpt
 from scapy.packet import Packet, Raw, bind_layers
-from scapy.fields import ShortField, LongField, XShortField
+from scapy.fields import ShortField, LongField, XShortField, IntField
 
 PROT_CMA = 254
 CMA_ID = b"\x65\x87"
@@ -30,12 +30,11 @@ if __name__ == "__main__":
     class CMA(Packet):
         name = "CMA"
         fields_desc = [
-            ShortField("pad", 0),
+            ShortField("len", 0),
             LongField("rx_time", 0),
             ShortField("mon_id", 0),
             ShortField("rx_port_id", 0),
-            ShortField("res", 0),
-            ShortField("len", 0),
+            IntField("res", 0),
             LongField("uid_time", 0),
             ShortField("uid_mon", 0),
             ShortField("uid_port", 0),

@@ -217,7 +217,10 @@ swap_endian_long(uint64_t value) {
  * 0                 64       80         96          112       128
  * | timestamp in ns | mon_id | port num | frame len | MONPROT |
  * Additionally, this function crafts the packet that goes to the analyzer, which is formed as
- * | ethernet + ip to get to analyzer | timestamp in ns | UID trailer | 80 bytes of header stack |
+ * 0				54           56                64       66        68    70    72
+ * | ethernet + ip6 | packet len | timestamp in ns | mon_id | port_id | res | res |
+ * 72            80
+ * | UID trailer | 80 bytes of header stack |
  */
 static inline void
 crinkle_forward(
@@ -237,38 +240,35 @@ crinkle_forward(
 			candidate_trailer = swap_endian(candidate_trailer);
 			ts_lower = swap_endian(ts_lower);
 		}
+		uint64_t uid_trailer[2];
+		uid_trailer[0] = systime_ns + i;
+		uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uid_trailer[0] << 16) & 0x00000000FFFF0000) + MONPROT;
+		if (lendian) {
+			uid_trailer[0] = swap_endian_long(uid_trailer[0]);
+			uid_trailer[1] = swap_endian_long(uid_trailer[1]);
+		}
 
 		// If the packet already has a UID trailer
 		if ((candidate_trailer & 0x0000FFFF) == MONPROT && (candidate_trailer >> 16) == (ts_lower & 0x0000FFFF)) {
-			uint64_t time = systime_ns + i;
-			if (lendian) time = swap_endian_long(time);
 			rte_mov15_or_less(c_pld-1, (uint8_t *)(&buf->data_len), 1);
 			rte_mov15_or_less(c_pld-2, (uint8_t *)(&buf->data_len) + 1, 1);
-			rte_mov15_or_less(c_pld, (uint8_t *)&time, 8);
-			rte_mov16(c_pld+8, (uint8_t *)candidate_trailer_ptr - 12);
+			rte_mov16(c_pld, (uint8_t *)uid_trailer);
+			rte_mov16(c_pld+16, (uint8_t *)candidate_trailer_ptr - 12);
 			uint8_t * buf_start = rte_pktmbuf_mtod(buf, uint8_t*);
-			rte_mov64(c_pld+24, buf_start);
-			rte_mov16(c_pld+88, buf_start+64);
+			rte_mov64(c_pld+32, buf_start);
+			rte_mov16(c_pld+96, buf_start+64);
 		}
 		else {
-			uint64_t uid_trailer[2];
-			uid_trailer[0] = systime_ns + i;
-			uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uid_trailer[0] << 16) & 0x00000000FFFF0000) + MONPROT;
-			if (lendian) {
-				uid_trailer[0] = swap_endian_long(uid_trailer[0]);
-				uid_trailer[1] = swap_endian_long(uid_trailer[1]);
-			}
-			
 			uint8_t *trailer = (uint8_t *)rte_pktmbuf_append(buf, 16);
 			rte_mov16(trailer, (uint8_t *)uid_trailer);
 
 			rte_mov15_or_less(c_pld-1, (uint8_t *)(&buf->data_len), 1);
 			rte_mov15_or_less(c_pld-2, (uint8_t *)(&buf->data_len) + 1, 1);
-			rte_mov15_or_less(c_pld, (uint8_t *)&uid_trailer[0], 8);
-			rte_mov16(c_pld+8, (uint8_t *)uid_trailer);
+			rte_mov16(c_pld, (uint8_t *)uid_trailer);
+			rte_mov16(c_pld+16, (uint8_t *)uid_trailer);
 			uint8_t * buf_start = rte_pktmbuf_mtod(buf, uint8_t*);
-			rte_mov64(c_pld+24, buf_start);
-			rte_mov16(c_pld+88, buf_start+64);
+			rte_mov64(c_pld+32, buf_start);
+			rte_mov16(c_pld+96, buf_start+64);
 		}
 	}
 }
@@ -280,7 +280,7 @@ crinkle_forward(
 
  /* Basic forwarding application lcore. 8< */
 static __rte_noreturn void
-lcore_main(struct rte_mempool *mbuf_pool, uint16_t ports[])
+lcore_main(struct rte_mempool *mbuf_pool, uint16_t vport_to_devport[], uint16_t devport_to_vport[])
 {
 	uint16_t port;
 
@@ -332,7 +332,7 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t ports[])
 		RTE_ETH_FOREACH_DEV(port) {
 
 			// port 0 is the analyzer
-			if (port == ports[0]) continue;
+			if (port == vport_to_devport[0]) continue;
 
 			/* Get burst of RX packets, from first port of pair. */
 			struct rte_mbuf *bufs[BURST_SIZE];
@@ -345,17 +345,17 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t ports[])
 			uint64_t start = rte_get_tsc_cycles();
 			clock_gettime(CLOCK_REALTIME, &systime);
 			systime_ns = timespec64_to_ns(&systime);
-			crinkle_forward(bufs, c_plds, nb_rx, systime_ns, port);
+			crinkle_forward(bufs, c_plds, nb_rx, systime_ns, devport_to_vport[port]);
 			uint64_t end = rte_get_tsc_cycles();
 
 			/* Send burst of TX packets, to second port of pair. */
 			uint16_t nb_tx = 0;
-			if (port == ports[1]) {
-				nb_tx = rte_eth_tx_burst(ports[2], 0,
+			if (port == vport_to_devport[1]) {
+				nb_tx = rte_eth_tx_burst(vport_to_devport[2], 0,
 						bufs, nb_rx);
 			}
 			else {
-				nb_tx = rte_eth_tx_burst(ports[1], 0,
+				nb_tx = rte_eth_tx_burst(vport_to_devport[1], 0,
 						bufs, nb_rx);
 			}
 
@@ -366,7 +366,7 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t ports[])
 					rte_pktmbuf_free(bufs[buf]);
 			}
 			
-			nb_tx = rte_eth_tx_burst(ports[0], 0, clone_bufs, nb_rx);
+			nb_tx = rte_eth_tx_burst(vport_to_devport[0], 0, clone_bufs, nb_rx);
 			/* Free any unsent packets. */
 			if (unlikely(nb_tx < nb_rx)) {
 				uint16_t buf;
@@ -416,7 +416,8 @@ main(int argc, char *argv[])
 	nb_ports = rte_eth_dev_count_avail();
 	
 	int arg;
-	uint16_t ports[nb_ports];
+	uint16_t vport_to_devport[nb_ports];
+	uint16_t devport_to_vport[nb_ports];
 	bool set_mon_id = false;
 	bool set_macs = false;
 	bool set_ips = false;
@@ -438,7 +439,8 @@ main(int argc, char *argv[])
 				// [dpdk virtual port]@[device number as parsed into dpdk]
 				uint16_t vport, devport;
 				sscanf(optarg, "%hu@%hu", &vport, &devport);
-				ports[vport] = devport;
+				vport_to_devport[vport] = devport;
+				devport_to_vport[devport] = vport;
 				break;
 			case 'm':
 				// MAC addresses, source then dest
@@ -506,8 +508,8 @@ main(int argc, char *argv[])
 		rte_exit(EXIT_FAILURE, "Did not set monitor id.\n");
 	}
 	for (uint16_t i = 0; i < nb_ports; ++i) {
-		if (ports[i] >= nb_ports) {
-			rte_exit(EXIT_FAILURE, "Invalid port mapping for virtual port %hu: %hu.\n", i, ports[i]);
+		if (vport_to_devport[i] >= nb_ports) {
+			rte_exit(EXIT_FAILURE, "Invalid port mapping for virtual port %hu: %hu.\n", i, vport_to_devport[i]);
 		}
 	}
 
@@ -535,7 +537,7 @@ main(int argc, char *argv[])
 	printf("Running at %lu hz\n", tsc_hz);
 
 	/* Call lcore_main on the main core only. Called on single lcore. 8< */
-	lcore_main(mbuf_pool, ports);
+	lcore_main(mbuf_pool, vport_to_devport, devport_to_vport);
 	/* >8 End of called on single lcore. */
 
 	/* clean up the EAL */
