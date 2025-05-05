@@ -145,7 +145,7 @@ class CrinkleMonitor(Node):
     default_image = "attestable_bmv2_v2_ubuntu_20"
     default_cores = 2
     default_ram = 4
-    default_disk = 20
+    default_disk = 10
 
     class MonitorData():
         def __init__(
@@ -846,7 +846,7 @@ class CrinkleSlice(Slice):
                     site = sitenames_to_sites.setdefault(sitename, fabresources.get_site(sitename))
                     hosts = sitenames_to_hosts.setdefault(sitename, site.get_hosts())
                     hostlist = list(hosts.items())
-                    random.shuffle(hostlist)
+                    #random.shuffle(hostlist)
                     endhosts = {}
                     for endpoint in endpoints:
                         if endpoint.get_host() is not None:
