@@ -909,7 +909,7 @@ class CrinkleSlice(Slice):
                 logging.info(f"Refreshing monitor for net {key} after slice creation, count {counter}")
                 refreshed_monitor = self.get_monitor(monitor.get_name())
                 mon_site = refreshed_monitor.get_site()
-                jobs.append(refreshed_monitor.execute_thread(f"sudo ip link set {self.analyzer_iface.get_device_name()} up; wget -q -P {REMOTEWORKDIR} {MONITORURL}; chmod u+x {REMOTEWORKDIR}/{DPDKNAME}"))
+                jobs.append(refreshed_monitor.execute_thread(f"sudo ip link set {self.analyzer_iface.get_device_name()} up; wget -q -O {REMOTEWORKDIR}/{DPDKNAME} {MONITORURL}; chmod u+x {REMOTEWORKDIR}/{DPDKNAME}"))
                 if self.cnets[mon_site] is None or not self.cnets[mon_site].is_instantiated():
                     self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_net_{mon_site}")
                 refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_net_{mon_site}")
