@@ -950,6 +950,7 @@ class CrinkleSlice(Slice):
                 logging.info(f'{ctr}/{len(jobs)} jobs finished')
                 print(f'{ctr}/{len(jobs)} jobs finished')
             logging.info(f"Saving Crinkle Data")
+            self.set_crinkle_data()
             self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
             self.update()
             logging.info(f"Rebooting Crinkle monitors")
@@ -984,7 +985,6 @@ class CrinkleSlice(Slice):
             logging.info(f"Crinkle post_boot_config done")
             print("Crinkle post_boot_config done")
             self.did_post_boot = True
-            self.set_crinkle_data()
 
     @staticmethod
     def mac_to_int(mac: str):
