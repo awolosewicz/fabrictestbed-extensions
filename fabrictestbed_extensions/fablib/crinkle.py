@@ -981,6 +981,8 @@ class CrinkleSlice(Slice):
             self.analyzer.execute(f'echo -e "{spade_control_commands}" | ./{REMOTEWORKDIR}/SPADE/bin/spade control', quiet=True)
             self.analyzer.upload_file(f"{CREASEDIR}/spade_reader.py", f"{REMOTEWORKDIR}/spade_reader.py")
             self.analyzer.execute(f"sudo chmod u+x {REMOTEWORKDIR}/spade_reader.py")
+            if self.monitor_string == '':
+                self.reset_monitor_string()
             self.analyzer.execute_thread(f"sudo ./{REMOTEWORKDIR}/spade_reader.py {self.monitor_string}")
             logging.info(f"Crinkle post_boot_config done")
             print("Crinkle post_boot_config done")
@@ -1189,10 +1191,21 @@ class CrinkleSlice(Slice):
                                 f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg', quiet=quiet)
         self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
 
+    def reset_monitor_string(self):
+        logging.info("Crinkle tried to start with blank monitor string, regenerating it")
+        self.monitor_string = f"{self.analyzer_iface.get_device_name()} "
+        for monitor in self.monitors.values():
+            self.monitor_string += f'{monitor.data.monitor_id} '
+            for iface_name, (_, _, _, num) in monitor.data.iface_mappings.items():
+                self.monitor_string += f'{num}@{iface_name} '
+        self.monitor_string = self.monitor_string.rstrip()
+
     def reset_analyzer(self, quiet: bool = True):
         """
         Reset the analyzer, wiping the database.
         """
+        if self.monitor_string == '':
+            self.reset_monitor_string()
         self.analyzer.execute(f'''sudo killall python3; echo -e "remove storage Neo4j\n" | ./{REMOTEWORKDIR}/SPADE/bin/spade control; rm -rf {REMOTEWORKDIR}/spade_database/; echo -e "add storage Neo4j database=/home/ubuntu/{REMOTEWORKDIR}/spade_database\n" | ./{REMOTEWORKDIR}/SPADE/bin/spade control''', quiet=quiet)
         self.analyzer.execute_thread(f'sudo ./{REMOTEWORKDIR}/spade_reader.py {self.monitor_string}')
     
