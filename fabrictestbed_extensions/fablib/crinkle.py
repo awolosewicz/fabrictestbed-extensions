@@ -988,6 +988,20 @@ class CrinkleSlice(Slice):
             print("Crinkle post_boot_config done")
             self.did_post_boot = True
 
+    def get_normal_nodes(self, refresh: bool = False) -> list[Node]:
+        """
+        Gets a list of all nodes in this slice.
+
+        :return: a list of fablib nodes
+        :rtype: List[Node]
+        """
+        if not self.nodes or not len(self.nodes):
+            refresh = True
+        self.__initialize_nodes(refresh=refresh)
+        crinkle_nodes = set([mon for mon in self.monitors.values()])
+        crinkle_nodes.add(self.analyzer)
+        return list(set(self.nodes.values()) - crinkle_nodes)
+
     @staticmethod
     def mac_to_int(mac: str):
         """
