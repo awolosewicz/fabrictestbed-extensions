@@ -35,6 +35,7 @@ REMOTEWORKDIR = ".crease"
 CREASEDIR = "fabrictestbed-extensions/fabrictestbed_extensions/fablib/crease"
 MONITORURL = "https://transparnet.cs.iit.edu/~awolosewicz/dpdk-crease_monitor"
 DPDKNAME = "dpdk-crease_monitor"
+MONPROT = 0x6587
 
 TCPDUMP_IMAGES = ["default_ubuntu_20",
                   "default_ubuntu_22",
@@ -447,6 +448,10 @@ class CrinkleSlice(Slice):
                 monitor.get_monitor_data()
                 slice.monitors[monitor.data.net_name] = monitor
                 slice.monitor_count += 1
+        
+        if slice.monitor_string == '':
+            slice.reset_monitor_string()
+        slice.set_crinkle_data()
 
         return slice
     
@@ -755,12 +760,32 @@ class CrinkleSlice(Slice):
                 iface_node_name = iface.get_node().get_name()
                 monitor_iface = monitor.add_component("NIC_Basic", f"{self.prefix}_nic_{iface_node_name}").get_interfaces()[0]
                 monitor_iface.set_mode("manual")
-                self.add_l2network(f"{name}-{iface_node_name}", [iface, monitor_iface], "L2Bridge", subnet, gateway, user_data)
+                new_net = self.add_l2network(f"{self.prefix}_net_{name}_{iface_node_name}", [iface, monitor_iface], "L2Bridge", subnet, gateway, user_data)
+                self.set_orig_net_name(new_net, name)
                 monitor.data.net_type = type
                 monitor.creation_data.append((iface_node_name, iface.get_name(), f"{self.prefix}_nic_{iface_node_name}", (iface in sinks), 0))
             self.monitors[name] = monitor
         monitor.set_monitor_data()
         return monitor
+    
+    @staticmethod
+    def get_orig_net_name(net: NetworkService) -> str:
+        user_data = net.get_user_data()
+        if "crinkle_net_name" in user_data:
+            orig_name = user_data["crinkle_net_name"]
+            logging.info(f"Retrieved original network name for {net.get_name()} as {orig_name}")
+            return orig_name
+        else:
+            logging.info(f"Did not retrieve original network name for {net.get_name()}")
+            return ""
+
+    @staticmethod
+    def set_orig_net_name(net: NetworkService, name: str):
+        logging.info(f"Storing orig name for network {net.get_name()} as {name}")
+        user_data = net.get_user_data()
+        user_data["crinkle_net_name"] = name
+        net.set_user_data()
+
     
     def submit(
         self,
@@ -1032,7 +1057,7 @@ class CrinkleSlice(Slice):
         ip6 = IPv6Address(ip6)
         return (int(ip6)//(2**64),int(ip6)%(2**64))
     
-    def probe(self, scapy: str, iface_name: str, name: str = "probe"):
+    def probe(self, scapy: str, iface_name: str = "", iface: Interface = None, name: str = "probe"):
         """
         Send a packet, formed from the given scapy definition and appended with a unique id,
         into the targeted interface then download the graph of its traversal across
@@ -1045,8 +1070,27 @@ class CrinkleSlice(Slice):
         :param name: The name of the downloaded graph
         :type name: String
         """
-        net_name = self.get_interface(name=iface_name).get_network().get_name()
-        monitor = self.monitors[net_name]
+        if iface_name == "" and iface is not None:
+            iface_name = iface.get_name()
+        else:
+            raise Exception("Exception: Either iface_name or iface must not be empty")
+        
+        net = self.get_interface(name=iface_name).get_network()
+        net_name = net.get_name()
+        if not net_name.startswith(f'{self.prefix}_net_'):
+            raise Exception("Exception: interface must be part of a monitored network")
+        
+        orig_net_name = self.get_orig_net_name(net)
+        monitor = None
+        if orig_net_name == "":
+            ifaces = net.get_interfaces()
+            for net_iface in ifaces:
+                node_name = net_iface.get_node().get_name()
+                if node_name.startswith(f"{self.prefix}_monitor_"):
+                    monitor = self.get_monitor(node_name)
+        else:
+            monitor = self.monitors[orig_net_name]
+        
         port = monitor.data.iface_mappings[iface_name][3]
         dev_name = monitor.data.iface_mappings[iface_name][1].get_device_name()
         if port == 1:
@@ -1054,7 +1098,8 @@ class CrinkleSlice(Slice):
         else:
             port = 1
         scapy = scapy.replace('"', '\\"')
-        uid = (7950 << 112) + (monitor.data.monitor_id << 100) + (port << 96) + self.probe_id
+        # uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uid_trailer[0] << 16) & 0x00000000FFFF0000) + MONPROT;
+        uid = (self.probe_id << 64) + (monitor.data.monitor_id << 48) + (port << 32) + ((self.probe_id << 16) & 0x00000000FFFF0000) + MONPROT
         self.probe_id += 1
         new_scapy = f'Raw({scapy})/Raw(int({uid}).to_bytes(16, \\"big\\"))'
         monitor.execute(f'''echo -e "from scapy.all import *\npkt={new_scapy}\nsendp(pkt, iface='{dev_name}')\n" | sudo python3''')
