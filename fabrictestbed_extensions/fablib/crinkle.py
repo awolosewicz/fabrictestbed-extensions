@@ -1222,7 +1222,7 @@ class CrinkleSlice(Slice):
         return ret_str
                 
 
-    def get_graph(self, name: str = "graph", filterin: str = None, tstart: int = -1, tend: int = -1, pkt_id: int = -1, quiet=True):
+    def get_graph(self, name: str = "graph", filterin: str = None, tstart = None, tend = None, tformat="epoch", pkt_id: int = -1, quiet=True):
         """
         Produce and download a graph of the data stored in the analyzer's SPADE database,
         filtered using the given arguments.
@@ -1316,14 +1316,21 @@ class CrinkleSlice(Slice):
                 ctr += 1
         spade_filter = spade_filter.rstrip()
         time_filter = ""
-        if tstart != -1 and tend != -1:
-            time_filter += f'''"time" >= {tstart} and "time" <= {tend}'''
-        elif tstart != -1:
-            time_filter += f'''"time" >= {tstart}'''
-        elif tend != -1:
-            time_filter += f'''"time" <= {tstart}'''
+        if tformat != "epoch":
+            if tstart:
+                tstart: datetime = datetime.strptime(tstart, tformat)
+                tstart = tstart.timestamp() * 1000000
+            elif tend:
+                tend: datetime = datetime.strptime(tend, tformat)
+                tend = tend.timestamp() * 1000000
+        if tstart and tend:
+            time_filter += f'''"epoch" >= {tstart} and "epoch" <= {tend}'''
+        elif tstart:
+            time_filter += f'''"epoch" >= {tstart}'''
+        elif tend:
+            time_filter += f'''"epoch" <= {tstart}'''
         graph_build = ""
-        if pkt_id != -1:
+        if pkt_id:
             graph_build += f'''\\$graph0 = \\$base.getPath(\\$base.getEdge(\\"pkt_id\\" == '{pkt_id}').limit(1000).getEdgeEndpoints(), \\$base.getVertex(\\"type\\" == 'Agent'), 1) + \\$base.getEdge(\\"pkt_id\\" == '{pkt_id}').limit(1000) + \\$base.getEdge(\\"pkt_id\\" == '{pkt_id}').limit(1000).getEdgeEndpoints()\n'''
         else:
             graph_build += '''\\$graph0 = \\$base\n'''

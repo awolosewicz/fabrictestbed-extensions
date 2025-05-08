@@ -142,10 +142,10 @@ if __name__ == "__main__":
                     pipe.write(f'type:Artifact id:{fid} eth.type:{eth_type} ip.src:{ip_src} ip.dst:{ip_dst} ip.prot:{ip_prot} prot.sport:{prot_sport} prot.dport:{prot_dport}\n')
             # print('Writing spade edges')
             with open("spade_pipe", 'a') as pipe:
-                print(f'type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time}\n')
-                pipe.write(f'type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time}\n')
-                print(f'type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time}\n')
-                pipe.write(f'type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time}\n')
+                print(f'type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{base.rx_time}\n')
+                pipe.write(f'type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{base.rx_time}\n')
+                print(f'type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time} epoch:{base.rx_time}\n')
+                pipe.write(f'type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time} epoch:{base.rx_time}\n')
 
     optpairs, args = getopt.getopt(sys.argv[1:], "m")
     monitors = {}
