@@ -785,7 +785,7 @@ class CrinkleSlice(Slice):
         logging.info(f"Storing orig name for network {net.get_name()} as {name}")
         user_data = net.get_user_data()
         user_data["crinkle_net_name"] = name
-        net.set_user_data()
+        net.set_user_data(user_data=user_data)
 
     
     def submit(
