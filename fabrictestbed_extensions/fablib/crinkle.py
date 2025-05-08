@@ -1013,7 +1013,7 @@ class CrinkleSlice(Slice):
             print("Crinkle post_boot_config done")
             self.did_post_boot = True
 
-    def get_normal_nodes(self, refresh: bool = False) -> list[Node]:
+    def get_non_crinkle_nodes(self, refresh: bool = False) -> list[Node]:
         """
         Gets a list of all nodes in this slice.
 
@@ -1057,6 +1057,15 @@ class CrinkleSlice(Slice):
         ip6 = IPv6Address(ip6)
         return (int(ip6)//(2**64),int(ip6)%(2**64))
     
+    def trace_ping(self, src_ip: str, dst_ip: str, iface_name: str = "", iface: Interface = None, name: str = "trace_ping"):
+        """
+        Create a ping packet from src_ip to dst_ip, that will be sent into the specified
+        monitored interface. This will return a graph of the history of the request as it traversed
+        the network.
+        """
+        self.probe(f'Ether(dst="ff:ff:ff:ff:ff:ff")/IP(src={src_ip},dst={dst_ip})/ICMP()',
+                   iface_name=iface_name, iface=iface, name=name)
+    
     def probe(self, scapy: str, iface_name: str = "", iface: Interface = None, name: str = "probe"):
         """
         Send a packet, formed from the given scapy definition and appended with a unique id,
@@ -1067,6 +1076,7 @@ class CrinkleSlice(Slice):
         :type scapy: String
         :param iface_name: The name of the interface to target with the packet
         :type iface_name: String
+        :param iface: An interface to target with the packet
         :param name: The name of the downloaded graph
         :type name: String
         """
@@ -1098,6 +1108,7 @@ class CrinkleSlice(Slice):
         else:
             port = 1
         scapy = scapy.replace('"', '\\"')
+        scapy = scapy.replace("'", "\\'")
         # uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uid_trailer[0] << 16) & 0x00000000FFFF0000) + MONPROT;
         uid = (self.probe_id << 64) + (monitor.data.monitor_id << 48) + (port << 32) + ((self.probe_id << 16) & 0x00000000FFFF0000) + MONPROT
         self.probe_id += 1
