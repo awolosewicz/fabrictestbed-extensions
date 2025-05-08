@@ -436,7 +436,7 @@ class CrinkleSlice(Slice):
         slice.get_crinkle_data(slice.analyzer)
         analyzer_site = slice.analyzer.get_site()
         for net in slice.get_networks():
-            if net.get_name().startswith(f"{name_prefix}_net_"):
+            if net.get_name().startswith(f"{name_prefix}_ananet_"):
                 slice.cnets[net.get_site()] = net
         slice.analyzer_cnet = slice.cnets[analyzer_site]
         slice.analyzer_name = slice.analyzer.get_name()
@@ -556,7 +556,7 @@ class CrinkleSlice(Slice):
         self.analyzer_name = analyzer.get_name()
         analyzer_site = self.analyzer.get_site()
         if analyzer_site not in self.cnets or self.cnets[analyzer_site] is None:
-            self.cnets[analyzer_site] = self.add_l3network(name=f"{self.prefix}_net_{site}", type="IPv6")
+            self.cnets[analyzer_site] = self.add_l3network(name=f"{self.prefix}_ananet_{site}", type="IPv6")
         self.analyzer_cnet = self.cnets[analyzer_site]
         analyzer_iface = self.analyzer.add_component(model="NIC_Basic",
                                                      name=f"{self.prefix}_nic_cnet").get_interfaces()[0]
@@ -872,6 +872,7 @@ class CrinkleSlice(Slice):
                     site = sitenames_to_sites.setdefault(sitename, fabresources.get_site(sitename))
                     hosts = sitenames_to_hosts.setdefault(sitename, site.get_hosts())
                     hostlist = list(hosts.items())
+                    hostlist = sorted(hostlist)
                     #random.shuffle(hostlist)
                     endhosts = {}
                     for endpoint in endpoints:
@@ -879,7 +880,7 @@ class CrinkleSlice(Slice):
                             endhosts.setdefault(endpoint.get_host(), True)
                             continue
                         foundhost = False
-                        for hostname, host in hostlist:
+                        for hostname, host in hostlist[1:]:
                             allocated_comps = allocated.setdefault(hostname, {})
                             if fablib._FablibManager__can_allocate_node_in_host(
                                 host=host, node=endpoint, allocated=allocated_comps, site=site)[0]:
@@ -925,7 +926,7 @@ class CrinkleSlice(Slice):
         if not self.did_post_boot:
             self.analyzer = self.get_node(name=self.analyzer_name)
             site = self.analyzer.get_site()
-            self.analyzer_cnet = self.get_l3network(name=f"{self.prefix}_net_{site}")
+            self.analyzer_cnet = self.get_l3network(name=f"{self.prefix}_ananet_{site}")
             self.analyzer_iface = self.analyzer.get_interface(network_name=self.analyzer_cnet.get_name())
             self.cnets[site]=self.analyzer_cnet
             jobs: list[futures.Future] = []
@@ -937,8 +938,8 @@ class CrinkleSlice(Slice):
                 mon_site = refreshed_monitor.get_site()
                 jobs.append(refreshed_monitor.execute_thread(f"sudo ip link set {self.analyzer_iface.get_device_name()} up; wget -q -O {REMOTEWORKDIR}/{DPDKNAME} {MONITORURL}; chmod u+x {REMOTEWORKDIR}/{DPDKNAME}"))
                 if self.cnets[mon_site] is None or not self.cnets[mon_site].is_instantiated():
-                    self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_net_{mon_site}")
-                refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_net_{mon_site}")
+                    self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_ananet_{mon_site}")
+                refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_ananet_{mon_site}")
                 ordered_devs = {}
                 ctr = 0
                 # Need a way to know where a specific interface falls *in the OS ordering of them*
@@ -1023,11 +1024,19 @@ class CrinkleSlice(Slice):
         """
         if not self.nodes or not len(self.nodes):
             refresh = True
-        self.__initialize_nodes(refresh=refresh)
-        crinkle_nodes = set([mon for mon in self.monitors.values()])
-        crinkle_nodes.add(self.analyzer)
-        return list(set(self.nodes.values()) - crinkle_nodes)
-
+        nodes = self.get_nodes(refresh=refresh)
+        crinkle_nodes = [mon_name for mon_name in self.monitors.keys()]
+        crinkle_nodes.append(self.analyzer_name)
+        i = 0
+        while i < len(nodes):
+            node = nodes[i]
+            nodename: str = node.get_name()
+            if nodename.startswith(f'{self.prefix}_monitor_') or nodename == f'{self.prefix}_analyzer':
+                nodes.pop(i)
+            else:
+                i += 1
+        return nodes
+    
     @staticmethod
     def mac_to_int(mac: str):
         """
