@@ -7,6 +7,7 @@ import enum
 import shutil
 import time
 import random
+from IPython.core.display_functions import display
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -37,12 +38,12 @@ MONITORURL = "https://transparnet.cs.iit.edu/~awolosewicz/dpdk-crease_monitor"
 DPDKNAME = "dpdk-crease_monitor"
 MONPROT = 0x6587
 
-TCPDUMP_IMAGES = ["default_ubuntu_20",
-                  "default_ubuntu_22",
-                  "default_ubuntu_24",
-                  "attestable_bmv2_v2_ubuntu_20",
-                  "docker_ubuntu_20",
-                  "docker_ubuntu_22"]
+UBUNTU_IMAGES = ["default_ubuntu_20",
+                 "default_ubuntu_22",
+                 "default_ubuntu_24",
+                 "attestable_bmv2_v2_ubuntu_20",
+                 "docker_ubuntu_20",
+                 "docker_ubuntu_22"]
 
 class MonNetData(enum.IntEnum):
     NODENAME = 0
@@ -1115,6 +1116,71 @@ class CrinkleSlice(Slice):
         new_scapy = f'Raw({scapy})/Raw(int({uid}).to_bytes(16, \\"big\\"))'
         monitor.execute(f'''echo -e "from scapy.all import *\npkt={new_scapy}\nsendp(pkt, iface='{dev_name}')\n" | sudo python3''')
         self.get_graph(name=name, pkt_id=uid)
+
+    def dump_counters(self) -> dict[str, dict[str, tuple[str, int, int]]]:
+        """
+        Runs through each non-crinkle Node, gets the rx_packets and tx_packets count for
+        each interface, then returns a dict of form dict[node name, dict[iface name, (dev name, rx, tx)]].
+        """
+        rdict: dict[str, dict[str, tuple[str, int, int]]] = {}
+        for node in self.get_non_crinkle_nodes():
+            if node.get_image() in UBUNTU_IMAGES:
+                nodename = node.get_name()
+                for iface in node.get_interfaces():
+                    ifacename = iface.get_name()
+                    devname = iface.get_device_name()
+                    stdout, _ = node.execute(f"cat /sys/class/net/{devname}/statistics/rx_packets && cat /sys/class/net/{devname}/statistics/tx_packets")
+                    counters = stdout.splitlines()
+                    rx = int(counters[0])
+                    tx = int(counters[1])
+                    rdict[nodename][ifacename] = (devname, rx, tx)
+        return rdict
+
+    def list_counters(self,
+                      output=None,
+                      fields=None,
+                      filter_function=None,
+                      quiet=False,
+                      pretty_names=True):
+        table = []
+        counter_dict = self.dump_counters()
+
+        pretty_names_dict = {}
+        if pretty_names:
+            pretty_names_dict = {
+                "node_name": "Node Name",
+                "interface": "Interface",
+                "dev_name": "Device Name",
+                "rx_pkts": "RX Packets",
+                "tx_pkts": "TX Packets"
+            }
+
+        for nodename, nodedict in counter_dict.items():
+            for ifacename, ifacetuple in nodedict.items():
+                rowdict = {"node_name": nodename,
+                           "interface": ifacename,
+                           "dev_name": ifacetuple[0],
+                           "rx_pkts": ifacetuple[1],
+                           "tx_pkts": ifacetuple[2]}
+                table.append(rowdict)
+
+        table = sorted(table, key=lambda x: (x["Node Name"], x["Interface"]))
+
+        table = self.get_fablib_manager().list_table(
+            table,
+            fields=fields,
+            title="Interface Counters",
+            output=output,
+            quiet=True,
+            filter_function=filter_function,
+            pretty_names_dict=pretty_names_dict
+        )
+
+        if table and not quiet:
+            display(table)
+
+        return table
+
 
     @staticmethod
     def ip_net_like(net: str):
