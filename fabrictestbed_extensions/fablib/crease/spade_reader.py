@@ -3,7 +3,7 @@ import enum
 import getopt
 import sys
 from ipaddress import IPv4Address, IPv6Address
-import datetime
+from datetime import datetime
 
 from scapy.all import sniff
 from scapy.layers.l2 import Ether
@@ -14,16 +14,6 @@ from scapy.fields import ShortField, LongField, XShortField, IntField
 
 PROT_CMA = 254
 CMA_ID = b"\x65\x87"
-
-
-def nanoseconds_to_timestamp(nanoseconds):
-    seconds = nanoseconds / 1e9
-    time_obj = datetime.timedelta(seconds=seconds)
-    hours, remainder = divmod(time_obj.seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    microseconds = time_obj.microseconds
-    timestamp = f"{hours:02}:{minutes:02}:{seconds:02}.{microseconds:06}"
-    return timestamp
 
 if __name__ == "__main__":
 
@@ -100,7 +90,8 @@ if __name__ == "__main__":
             monitor_iface_id = base.rx_port_id
             uid = f'{base.uid_mon}-{base.uid_port}-{base.uid_time}'
             size = base.len - 16
-            time = nanoseconds_to_timestamp(base.rx_time)
+            epoch = base.rx_time / 1e9
+            time = datetime.fromtimestamp(epoch).strftime("%d-%m-%Y_%H:%M:%S.%f")
 
             h_eth = base['Ether']
             eth_type = hex(h_eth.type)
@@ -142,10 +133,10 @@ if __name__ == "__main__":
                     pipe.write(f'type:Artifact id:{fid} eth.type:{eth_type} ip.src:{ip_src} ip.dst:{ip_dst} ip.prot:{ip_prot} prot.sport:{prot_sport} prot.dport:{prot_dport}\n')
             # print('Writing spade edges')
             with open("spade_pipe", 'a') as pipe:
-                print(f'type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{base.rx_time}\n')
-                pipe.write(f'type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{base.rx_time}\n')
-                print(f'type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time} epoch:{base.rx_time}\n')
-                pipe.write(f'type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time} epoch:{base.rx_time}\n')
+                print(f'type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
+                pipe.write(f'type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
+                print(f'type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
+                pipe.write(f'type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
 
     optpairs, args = getopt.getopt(sys.argv[1:], "m")
     monitors = {}

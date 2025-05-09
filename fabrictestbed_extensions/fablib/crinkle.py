@@ -1222,7 +1222,7 @@ class CrinkleSlice(Slice):
         return ret_str
                 
 
-    def get_graph(self, name: str = "graph", filterin: str = None, tstart = None, tend = None, tformat="epoch", pkt_id: int = -1, quiet=True):
+    def get_graph(self, name: str = "graph", filterin: str = None, tstart = None, tend = None, tformat="epoch", pkt_id = None, quiet=True):
         """
         Produce and download a graph of the data stored in the analyzer's SPADE database,
         filtered using the given arguments.
@@ -1324,18 +1324,18 @@ class CrinkleSlice(Slice):
                 tend: datetime = datetime.strptime(tend, tformat)
                 tend = tend.timestamp() * 1000000
         if tstart and tend:
-            time_filter += f'''"epoch" >= {tstart} and "epoch" <= {tend}'''
+            time_filter += f'''(\\"epoch\\" >= '{tstart}' and \\"epoch\\" <= '{tend}')'''
         elif tstart:
-            time_filter += f'''"epoch" >= {tstart}'''
+            time_filter += f'''(\\"epoch\\" >= '{tstart}')'''
         elif tend:
-            time_filter += f'''"epoch" <= {tstart}'''
+            time_filter += f'''(\\"epoch\\" <= '{tstart}')'''
         graph_build = ""
         if pkt_id:
             graph_build += f'''\\$graph0 = \\$base.getPath(\\$base.getEdge(\\"pkt_id\\" == '{pkt_id}').limit(1000).getEdgeEndpoints(), \\$base.getVertex(\\"type\\" == 'Agent'), 1) + \\$base.getEdge(\\"pkt_id\\" == '{pkt_id}').limit(1000) + \\$base.getEdge(\\"pkt_id\\" == '{pkt_id}').limit(1000).getEdgeEndpoints()\n'''
         else:
             graph_build += '''\\$graph0 = \\$base\n'''
         if time_filter != "":
-            graph_build += f'''\\$graph1 = \\$graph0.getLineage(\\$base.getEdge({time_filter}).limit(1000), 1, 'b')\n'''
+            graph_build += f'''\\$graph1 = \\$graph0.getPath(\\$graph0.getEdge({time_filter}).limit(1000).getEdgeEndpoints(), \\$graph0.getVertex(\\"type\\" == 'Agent'), 1) + \\$graph0.getEdge({time_filter}).limit(1000) + \\$graph0.getEdge({time_filter}).limit(1000).getEdgeEndpoints()\n'''
         else:
             graph_build += '''\\$graph1 = \\$graph0\n'''
         graph_build += f'''\\$graph2 = \\$graph1.getLineage(\\$graph1.getVertex({spade_filter}), 1, 'b')\n\\$graph3 = \\$graph2 + \\$base.getPath(\\$graph2.getVertex(\\"type\\" == 'Process'), \\$base.getVertex(\\"type\\" == 'Agent'), 1)'''
