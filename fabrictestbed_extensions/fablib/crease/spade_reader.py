@@ -91,7 +91,7 @@ if __name__ == "__main__":
             uid = f'{base.uid_mon}-{base.uid_port}-{base.uid_time}'
             size = base.len - 16
             epoch = base.rx_time / 1e9
-            time = datetime.fromtimestamp(epoch).strftime("%d-%m-%Y_%H:%M:%S.%f")
+            time = datetime.fromtimestamp(epoch).strftime("%Y-%m-%d_%H:%M:%S.%f")
 
             h_eth = base['Ether']
             eth_type = hex(h_eth.type)

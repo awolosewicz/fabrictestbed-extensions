@@ -1073,7 +1073,7 @@ class CrinkleSlice(Slice):
         monitored interface. This will return a graph of the history of the request as it traversed
         the network.
         """
-        self.probe(f'Ether(dst="ff:ff:ff:ff:ff:ff")/IP(src={src_ip},dst={dst_ip})/ICMP()',
+        self.probe(f'Ether(dst="ff:ff:ff:ff:ff:ff")/IP(src="{src_ip}",dst="{dst_ip}")/ICMP()',
                    iface_name=iface_name, iface=iface, name=name)
     
     def probe(self, scapy: str, iface_name: str = "", iface: Interface = None, name: str = "probe"):
@@ -1092,7 +1092,7 @@ class CrinkleSlice(Slice):
         """
         if iface_name == "" and iface is not None:
             iface_name = iface.get_name()
-        else:
+        elif iface_name == "" and iface is None:
             raise Exception("Exception: Either iface_name or iface must not be empty")
         
         net = self.get_interface(name=iface_name).get_network()
@@ -1124,7 +1124,7 @@ class CrinkleSlice(Slice):
         self.probe_id += 1
         new_scapy = f'Raw({scapy})/Raw(int({uid}).to_bytes(16, \\"big\\"))'
         monitor.execute(f'''echo -e "from scapy.all import *\npkt={new_scapy}\nsendp(pkt, iface='{dev_name}')\n" | sudo python3''')
-        self.get_graph(name=name, pkt_id=uid)
+        self.get_graph(name=name, pkt_id=f'{monitor.data.monitor_id}-{port}-{self.probe_id}')
 
     def dump_counters(self) -> dict[str, dict[str, tuple[str, int, int]]]:
         """
@@ -1138,11 +1138,14 @@ class CrinkleSlice(Slice):
                 for iface in node.get_interfaces():
                     ifacename = iface.get_name()
                     devname = iface.get_device_name()
-                    stdout, _ = node.execute(f"cat /sys/class/net/{devname}/statistics/rx_packets && cat /sys/class/net/{devname}/statistics/tx_packets")
+                    stdout, _ = node.execute(f"cat /sys/class/net/{devname}/statistics/rx_packets && cat /sys/class/net/{devname}/statistics/tx_packets", quiet=True)
                     counters = stdout.splitlines()
                     rx = int(counters[0])
                     tx = int(counters[1])
-                    rdict[nodename][ifacename] = (devname, rx, tx)
+                    if nodename in rdict:
+                        rdict[nodename][ifacename] = (devname, rx, tx)
+                    else:
+                        rdict[nodename] = {ifacename: (devname, rx, tx)}
         return rdict
 
     def list_counters(self,
@@ -1320,7 +1323,7 @@ class CrinkleSlice(Slice):
             if tstart:
                 tstart: datetime = datetime.strptime(tstart, tformat)
                 tstart = tstart.timestamp() * 1000000
-            elif tend:
+            if tend:
                 tend: datetime = datetime.strptime(tend, tformat)
                 tend = tend.timestamp() * 1000000
         if tstart and tend:
@@ -1328,7 +1331,7 @@ class CrinkleSlice(Slice):
         elif tstart:
             time_filter += f'''(\\"epoch\\" >= '{tstart}')'''
         elif tend:
-            time_filter += f'''(\\"epoch\\" <= '{tstart}')'''
+            time_filter += f'''(\\"epoch\\" <= '{tend}')'''
         graph_build = ""
         if pkt_id:
             graph_build += f'''\\$graph0 = \\$base.getPath(\\$base.getEdge(\\"pkt_id\\" == '{pkt_id}').limit(1000).getEdgeEndpoints(), \\$base.getVertex(\\"type\\" == 'Agent'), 1) + \\$base.getEdge(\\"pkt_id\\" == '{pkt_id}').limit(1000) + \\$base.getEdge(\\"pkt_id\\" == '{pkt_id}').limit(1000).getEdgeEndpoints()\n'''
