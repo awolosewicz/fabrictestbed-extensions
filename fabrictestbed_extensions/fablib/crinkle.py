@@ -1176,7 +1176,7 @@ class CrinkleSlice(Slice):
                            "tx_pkts": ifacetuple[2]}
                 table.append(rowdict)
 
-        table = sorted(table, key=lambda x: (x["Node Name"], x["Interface"]))
+        table = sorted(table, key=lambda x: (x["node_name"], x["interface"]))
 
         table = self.get_fablib_manager().list_table(
             table,
