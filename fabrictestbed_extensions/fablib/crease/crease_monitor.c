@@ -50,7 +50,8 @@ static inline uint64_t timespec64_to_ns(const struct timespec *ts)
 }
 
 /* basicfwd.c: Basic DPDK skeleton forwarding example. */
-static uint64_t measures[16];
+// timing
+//static uint64_t measures[16];
 unsigned char ana_headers[64];
 uint64_t mon_id;
 
@@ -225,21 +226,37 @@ swap_endian_long(uint64_t value) {
 static inline void
 crinkle_forward(
 	struct rte_mbuf **bufs,
-	uint8_t **c_plds,
+	struct rte_mbuf **cbufs,
 	const uint16_t nb_pkts,
 	const uint64_t systime_ns,
 	const uint64_t port)
 {
 	for (int i = 0; i < nb_pkts; ++i) {
 		struct rte_mbuf *buf = bufs[i];
-		uint8_t *c_pld = c_plds[i];
+		struct rte_mbuf *cbuf = cbufs[i];
+
+		// Ether(14) + IPv6(40) + len(2) + 2xUID(32) + packet_w/o_trailer(data_len-16)
+		int size_delta = 88 + buf->data_len-16 - cbuf->data_len;
+		uint8_t *c;
+		if (size_delta > 0) {
+			c = (uint8_t *)rte_pktmbuf_append(cbuf, size_delta);
+		}
+		else {
+			c = rte_pktmbuf_mtod(cbuf, uint8_t*);
+		}
+		rte_mov64(c, ana_headers);
+		c += 54;
+		
+		// candidate_trailer points to the lower 4 bytes, which are the ts check and MONPROT
 		uint32_t *candidate_trailer_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
 		uint32_t candidate_trailer = *candidate_trailer_ptr;
+		// The ts corresponding to ts check
 		uint32_t ts_lower = *(candidate_trailer_ptr-2);
 		if (lendian) {
 			candidate_trailer = swap_endian(candidate_trailer);
 			ts_lower = swap_endian(ts_lower);
 		}
+
 		uint64_t uid_trailer[2];
 		uid_trailer[0] = systime_ns + i;
 		uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uid_trailer[0] << 16) & 0x00000000FFFF0000) + MONPROT;
@@ -250,25 +267,30 @@ crinkle_forward(
 
 		// If the packet already has a UID trailer
 		if ((candidate_trailer & 0x0000FFFF) == MONPROT && (candidate_trailer >> 16) == (ts_lower & 0x0000FFFF)) {
-			rte_mov15_or_less(c_pld-1, (uint8_t *)(&buf->data_len), 1);
-			rte_mov15_or_less(c_pld-2, (uint8_t *)(&buf->data_len) + 1, 1);
-			rte_mov16(c_pld, (uint8_t *)uid_trailer);
-			rte_mov16(c_pld+16, (uint8_t *)candidate_trailer_ptr - 12);
+			rte_mov15_or_less(c, (uint8_t *)(&buf->data_len), 1);
+			rte_mov15_or_less(c+1, (uint8_t *)(&buf->data_len) + 1, 1);
+			rte_mov16(c+2, (uint8_t *)uid_trailer);
+			rte_mov16(c+18, (uint8_t *)candidate_trailer_ptr - 12);
 			uint8_t * buf_start = rte_pktmbuf_mtod(buf, uint8_t*);
-			rte_mov64(c_pld+32, buf_start);
-			rte_mov16(c_pld+96, buf_start+64);
+			rte_memcpy(c+34, buf_start, buf->data_len-16);
 		}
 		else {
-			uint8_t *trailer = (uint8_t *)rte_pktmbuf_append(buf, 16);
+			uint8_t *trailer;
+			size_delta = 16 - rte_pktmbuf_tailroom(buf);
+			if (size_delta > 0) {
+				trailer = (uint8_t *)rte_pktmbuf_append(buf, size_delta);
+			}
+			else {
+				trailer = rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len);
+			}
 			rte_mov16(trailer, (uint8_t *)uid_trailer);
 
-			rte_mov15_or_less(c_pld-1, (uint8_t *)(&buf->data_len), 1);
-			rte_mov15_or_less(c_pld-2, (uint8_t *)(&buf->data_len) + 1, 1);
-			rte_mov16(c_pld, (uint8_t *)uid_trailer);
-			rte_mov16(c_pld+16, (uint8_t *)uid_trailer);
+			rte_mov15_or_less(c, (uint8_t *)(&buf->data_len), 1);
+			rte_mov15_or_less(c+1, (uint8_t *)(&buf->data_len) + 1, 1);
+			rte_mov16(c+2, (uint8_t *)uid_trailer);
+			rte_mov16(c+18, (uint8_t *)uid_trailer);
 			uint8_t * buf_start = rte_pktmbuf_mtod(buf, uint8_t*);
-			rte_mov64(c_pld+32, buf_start);
-			rte_mov16(c_pld+96, buf_start+64);
+			rte_memcpy(c+34, buf_start, buf->data_len-16);
 		}
 	}
 }
@@ -300,7 +322,8 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t vport_to_devport[], uint16_t 
 			rte_lcore_id());
 
 	/* Main work of application loop. 8< */
-	uint8_t ctr = 0;
+	// timing variable
+	//uint8_t ctr = 0;
 	struct timespec systime;
 	uint64_t systime_ns;
 
@@ -311,18 +334,10 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t vport_to_devport[], uint16_t 
         lendian = true;
     }
 
-	struct rte_mbuf *clone_bufs[BURST_SIZE];
-	int retval = rte_pktmbuf_alloc_bulk(mbuf_pool, clone_bufs, BURST_SIZE);
+	struct rte_mbuf *cbufs[BURST_SIZE];
+	int retval = rte_pktmbuf_alloc_bulk(mbuf_pool, cbufs, BURST_SIZE);
 	if (retval != 0) {
 		printf("Failed to allocate clone bufs: Code %i\n", retval);
-	}
-	uint8_t *c_plds[BURST_SIZE];
-	// Clone addresses will always be the same, so keep constant
-	for (int i = 0; i < BURST_SIZE; ++i) {
-		struct rte_mbuf *cbuf = clone_bufs[i];
-		uint8_t *c = (uint8_t *)rte_pktmbuf_append(cbuf, 64+16+80);
-		rte_mov64(c, ana_headers);
-		c_plds[i] = c + 56;
 	}
 	for (;;) {
 		/*
@@ -342,11 +357,13 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t vport_to_devport[], uint16_t 
 			if (unlikely(nb_rx == 0))
 				continue;
 
-			uint64_t start = rte_get_tsc_cycles();
+			// timing
+			//uint64_t start = rte_get_tsc_cycles();
 			clock_gettime(CLOCK_REALTIME, &systime);
 			systime_ns = timespec64_to_ns(&systime);
-			crinkle_forward(bufs, c_plds, nb_rx, systime_ns, devport_to_vport[port]);
-			uint64_t end = rte_get_tsc_cycles();
+			crinkle_forward(bufs, cbufs, nb_rx, systime_ns, devport_to_vport[port]);
+			// timing
+			//uint64_t end = rte_get_tsc_cycles();
 
 			/* Send burst of TX packets, to second port of pair. */
 			uint16_t nb_tx = 0;
@@ -366,24 +383,25 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t vport_to_devport[], uint16_t 
 					rte_pktmbuf_free(bufs[buf]);
 			}
 			
-			nb_tx = rte_eth_tx_burst(vport_to_devport[0], 0, clone_bufs, nb_rx);
+			nb_tx = rte_eth_tx_burst(vport_to_devport[0], 0, cbufs, nb_rx);
 			/* Free any unsent packets. */
 			if (unlikely(nb_tx < nb_rx)) {
 				uint16_t buf;
 				for (buf = nb_tx; buf < nb_rx; buf++)
-					rte_pktmbuf_free(clone_bufs[buf]);
+					rte_pktmbuf_free(cbufs[buf]);
 			}
 
-			measures[ctr++] = end - start;
-			if (ctr == sizeof(measures)/sizeof(measures[0])) {
-				printf("%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
-					   measures[0], measures[1], measures[2], measures[3],
-					   measures[4], measures[5], measures[6], measures[7],
-					   measures[8], measures[9], measures[10], measures[11],
-					   measures[12], measures[13], measures[14], measures[15]);
-				fflush(stdout);
-				ctr = 0;
-			}
+			// timing
+			// measures[ctr++] = end - start;
+			// if (ctr == sizeof(measures)/sizeof(measures[0])) {
+			// 	printf("%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
+			// 		   measures[0], measures[1], measures[2], measures[3],
+			// 		   measures[4], measures[5], measures[6], measures[7],
+			// 		   measures[8], measures[9], measures[10], measures[11],
+			// 		   measures[12], measures[13], measures[14], measures[15]);
+			// 	fflush(stdout);
+			// 	ctr = 0;
+			// }
 		}
 	}
 	/* >8 End of loop. */
