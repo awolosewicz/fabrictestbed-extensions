@@ -1121,10 +1121,11 @@ class CrinkleSlice(Slice):
         scapy = scapy.replace("'", "\\'")
         # uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uid_trailer[0] << 16) & 0x00000000FFFF0000) + MONPROT;
         uid = (self.probe_id << 64) + (monitor.data.monitor_id << 48) + (port << 32) + ((self.probe_id << 16) & 0x00000000FFFF0000) + MONPROT
-        self.probe_id += 1
         new_scapy = f'Raw({scapy})/Raw(int({uid}).to_bytes(16, \\"big\\"))'
         monitor.execute(f'''echo -e "from scapy.all import *\npkt={new_scapy}\nsendp(pkt, iface='{dev_name}')\n" | sudo python3''')
+        logging.info(f'Sent probe packet with uid {monitor.data.monitor_id}-{port}-{self.probe_id}')
         self.get_graph(name=name, pkt_id=f'{monitor.data.monitor_id}-{port}-{self.probe_id}')
+        self.probe_id += 1
 
     def dump_counters(self) -> dict[str, dict[str, tuple[str, int, int]]]:
         """

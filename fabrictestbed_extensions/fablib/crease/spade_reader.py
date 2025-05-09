@@ -106,6 +106,14 @@ if __name__ == "__main__":
                 ip_src = IPv6Address(h_ip.src)
                 ip_dst = IPv6Address(h_ip.dst)
                 ip_prot = h_ip.nh
+            if ip_prot == 6:
+                h_tcp = h_ip['TCP']
+                prot_sport = h_tcp.sport
+                prot_dport = h_tcp.dport
+            elif ip_prot == 17:
+                h_tcp = h_ip['UDP']
+                prot_sport = h_tcp.sport
+                prot_dport = h_tcp.dport
 
             tx_id = None
             rx_id = None
