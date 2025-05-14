@@ -41,7 +41,7 @@ MONPROT = 0x6587
 UBUNTU_IMAGES = ["default_ubuntu_20",
                  "default_ubuntu_22",
                  "default_ubuntu_24",
-                 "attestable_bmv2_v2_ubuntu_20",
+                 "crease_ubuntu_22",
                  "docker_ubuntu_20",
                  "docker_ubuntu_22"]
 
@@ -53,7 +53,7 @@ class MonNetData(enum.IntEnum):
     PORTNUM = 4
 
 class CrinkleAnalyzer(Node):
-    default_image = "attestable_bmv2_v2_ubuntu_20"
+    default_image = "crease_ubuntu_22"
 
     def __init__(
         self,
@@ -144,7 +144,7 @@ class CrinkleAnalyzer(Node):
     
 class CrinkleMonitor(Node):
 
-    default_image = "attestable_bmv2_v2_ubuntu_20"
+    default_image = "crease_ubuntu_22"
     default_cores = 2
     default_ram = 4
     default_disk = 10
