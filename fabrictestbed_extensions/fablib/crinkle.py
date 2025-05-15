@@ -890,7 +890,7 @@ class CrinkleSlice(Slice):
                                 logging.info(f'Node {endpoint.get_name()} assigned to {hostname}')
                                 break
                         if not foundhost:
-                            raise Exception(f"Could not place node {endpoint.get_name()}")
+                            raise Exception(f"Could not place node {endpoint.get_name()} due to a lack of free workers. Please try another site.")
                     for hostname, host in hostlist:
                         if hostname in endhosts:
                             continue
@@ -901,7 +901,7 @@ class CrinkleSlice(Slice):
                             logging.info(f'Node {monitor.get_name()} assigned to {hostname}')
                             break
                     if monitor.get_host() is None:
-                        raise Exception(f"Could not place monitor for network {monitor.data.net_name}")
+                        raise Exception(f"Could not place monitor for network {monitor.data.net_name} due to a lack of free workers. Please try another site.")
                 self.do_allocate_hosts = False
             logging.info("Hosts allocated")
         
@@ -952,6 +952,8 @@ class CrinkleSlice(Slice):
                 refreshed_monitor.data.cmd_args += f"-m {refreshed_monitor.data.cnet_iface.get_mac()} -m {self.analyzer_iface.get_mac()} "
                 refreshed_monitor.data.cmd_args += f"-i {refreshed_monitor.data.cnet_iface.get_ip_addr()} -i {self.analyzer_iface.get_ip_addr()} "
                 dev_name = refreshed_monitor.data.cnet_iface.get_device_name()
+                if dev_name is None:
+                    raise Exception(f"Monitor {refreshed_monitor.get_name()} failed to attach interfaces - please try another site")
                 refreshed_monitor.data.cmd_args += f"-d {refreshed_monitor.data.port_nums}@{ordered_devs[dev_name]} "
                 refreshed_monitor.data.port_nums += 1
                 self.monitor_string += f'{refreshed_monitor.data.monitor_id} '
