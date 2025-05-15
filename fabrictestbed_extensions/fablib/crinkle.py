@@ -891,7 +891,6 @@ class CrinkleSlice(Slice):
                         if validated_nodes[endpoint_name]:
                             endhosts.setdefault(endpoint.get_host(), True)
                             continue
-                        found_host = False
                         for host_name, host in hostlist[1:]:
                             allocated_comps = allocated.setdefault(host_name, {})
                             if fablib._FablibManager__can_allocate_node_in_host(
@@ -899,10 +898,9 @@ class CrinkleSlice(Slice):
                                 endpoint.set_host(host_name=host_name)
                                 endhosts.setdefault(host_name, True)
                                 validated_nodes[endpoint_name] = True
-                                found_host = True
                                 logging.info(f'Node {endpoint_name} assigned to {host_name}')
                                 break
-                        if not found_host:
+                        if not validated_nodes[endpoint_name]:
                             raise Exception(f"Could not place node {endpoint_name} due to a lack of free workers. Please try another site.")
                     for host_name, host in hostlist:
                         if host_name in endhosts:
@@ -915,7 +913,7 @@ class CrinkleSlice(Slice):
                             validated_nodes[monitor_name] = True
                             logging.info(f'Node {monitor_name} assigned to {host_name}')
                             break
-                    if monitor.get_host() is None:
+                    if not validated_nodes[monitor_name]:
                         raise Exception(f"Could not place monitor for network {monitor.data.net_name} due to a lack of free workers. Please try another site.")
             for node in self.get_nodes():
                 node_name = node.get_name()
@@ -930,10 +928,10 @@ class CrinkleSlice(Slice):
                 for host_name, host in hostlist:
                     if fablib._FablibManager__can_allocate_node_in_host(
                         host=host, node=node, allocated=allocated_comps, site=site)[0]:
-                        validated_nodes[node.get_name()] = True
+                        validated_nodes[node_name] = True
                         logging.info(f"Node {node_name} assigned to {host_name}")
-                    else:
-                        raise Exception(f"Could not place node {node_name} due to a lack of free workers. Please try another site.")
+                if not validated_nodes[node_name]:
+                    raise Exception(f"Could not place node {node_name} due to a lack of free workers. Please try another site.")
 
 
             self.do_allocate_hosts = False
