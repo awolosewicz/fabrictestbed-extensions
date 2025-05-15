@@ -210,9 +210,7 @@ class CrinkleMonitor(Node):
         
         monitor = CrinkleMonitor(
             slice,
-            slice.topology.add_node(name=name, site=site),
-            validate=True,
-            raise_exception=True
+            slice.topology.add_node(name=name, site=site)
         )
 
         monitor.set_capacities(
