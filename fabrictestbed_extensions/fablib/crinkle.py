@@ -862,47 +862,88 @@ class CrinkleSlice(Slice):
             sitenames_to_hosts: dict[str, dict[str, Host]] = {}
             fablib = self.get_fablib_manager()
             fabresources = fablib.get_resources()
+            validated_nodes: dict[str, bool] = {}
+
+            for node in self.get_nodes():
+                host_name = node.get_host()
+                if host_name is None:
+                    validated_nodes[node.get_name()] = False
+                    continue
+                allocated_comps = allocated.setdefault(host_name, {})
+                site_name = node.get_site()
+                site = sitenames_to_sites.setdefault(site_name, fabresources.get_site(site_name))
+                hosts = sitenames_to_hosts.setdefault(site_name, site.get_hosts())
+                host = hosts[host_name]
+                if fablib._FablibManager__can_allocate_node_in_host(
+                    host=host, node=node, allocated=allocated_comps, site=site)[0]:
+                    validated_nodes[node.get_name()] = True
+                else:
+                    raise Exception(f"Host {host_name} does not have the free resources to reserve Node {node.get_name()}")
+
             for _, monitor in self.monitors.items():
                 logging.info(f"Allocating Monitor for network {monitor.data.net_name}")
                 if monitor.data.net_type == "L2Bridge":
                     endpoint1 = self.get_node(name=monitor.creation_data[0][0])
                     endpoint2 = self.get_node(name=monitor.creation_data[1][0])
                     endpoints = [endpoint1, endpoint2]
-                    sitename = endpoint1.get_site()
-                    site = sitenames_to_sites.setdefault(sitename, fabresources.get_site(sitename))
-                    hosts = sitenames_to_hosts.setdefault(sitename, site.get_hosts())
+                    site_name = endpoint1.get_site()
+                    site = sitenames_to_sites.setdefault(site_name, fabresources.get_site(site_name))
+                    hosts = sitenames_to_hosts.setdefault(site_name, site.get_hosts())
                     hostlist = list(hosts.items())
                     hostlist = sorted(hostlist)
                     #random.shuffle(hostlist)
                     endhosts = {}
                     for endpoint in endpoints:
-                        if endpoint.get_host() is not None:
+                        endpoint_name = endpoint.get_name()
+                        if validated_nodes[endpoint_name]:
                             endhosts.setdefault(endpoint.get_host(), True)
                             continue
-                        foundhost = False
-                        for hostname, host in hostlist[1:]:
-                            allocated_comps = allocated.setdefault(hostname, {})
+                        found_host = False
+                        for host_name, host in hostlist[1:]:
+                            allocated_comps = allocated.setdefault(host_name, {})
                             if fablib._FablibManager__can_allocate_node_in_host(
                                 host=host, node=endpoint, allocated=allocated_comps, site=site)[0]:
-                                endpoint.set_host(host_name=hostname)
-                                endhosts.setdefault(hostname, True)
-                                foundhost = True
-                                logging.info(f'Node {endpoint.get_name()} assigned to {hostname}')
+                                endpoint.set_host(host_name=host_name)
+                                endhosts.setdefault(host_name, True)
+                                validated_nodes[endpoint_name] = True
+                                found_host = True
+                                logging.info(f'Node {endpoint_name} assigned to {host_name}')
                                 break
-                        if not foundhost:
-                            raise Exception(f"Could not place node {endpoint.get_name()} due to a lack of free workers. Please try another site.")
-                    for hostname, host in hostlist:
-                        if hostname in endhosts:
+                        if not found_host:
+                            raise Exception(f"Could not place node {endpoint_name} due to a lack of free workers. Please try another site.")
+                    for host_name, host in hostlist:
+                        if host_name in endhosts:
                             continue
-                        allocated_comps = allocated.setdefault(hostname, {})
+                        allocated_comps = allocated.setdefault(host_name, {})
                         if fablib._FablibManager__can_allocate_node_in_host(
                             host=host, node=monitor, allocated=allocated_comps, site=site)[0]:
-                            monitor.set_host(host_name=hostname)
-                            logging.info(f'Node {monitor.get_name()} assigned to {hostname}')
+                            monitor.set_host(host_name=host_name)
+                            monitor_name = monitor.get_name()
+                            validated_nodes[monitor_name] = True
+                            logging.info(f'Node {monitor_name} assigned to {host_name}')
                             break
                     if monitor.get_host() is None:
                         raise Exception(f"Could not place monitor for network {monitor.data.net_name} due to a lack of free workers. Please try another site.")
-                self.do_allocate_hosts = False
+            for node in self.get_nodes():
+                node_name = node.get_name()
+                if validated_nodes[node_name]:
+                    continue
+                allocated_comps = allocated.setdefault(host_name, {})
+                site_name = node.get_site()
+                site = sitenames_to_sites.setdefault(site_name, fabresources.get_site(site_name))
+                hosts = sitenames_to_hosts.setdefault(site_name, site.get_hosts())
+                hostlist = list(hosts.items())
+                hostlist = sorted(hostlist)
+                for host_name, host in hostlist:
+                    if fablib._FablibManager__can_allocate_node_in_host(
+                        host=host, node=node, allocated=allocated_comps, site=site)[0]:
+                        validated_nodes[node.get_name()] = True
+                        logging.info(f"Node {node_name} assigned to {host_name}")
+                    else:
+                        raise Exception(f"Could not place node {node_name} due to a lack of free workers. Please try another site.")
+
+
+            self.do_allocate_hosts = False
             logging.info("Hosts allocated")
         
         return super().submit(wait=wait, wait_timeout=wait_timeout, wait_interval=wait_interval, progress=progress, wait_jupyter=wait_jupyter, post_boot_config=post_boot_config, wait_ssh=wait_ssh,
