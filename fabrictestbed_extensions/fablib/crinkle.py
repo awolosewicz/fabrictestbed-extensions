@@ -616,13 +616,6 @@ class CrinkleSlice(Slice):
 
         self.nodes = None
         self.interfaces = {}
-
-        status, error = self.get_fablib_manager().validate_node(node=monitor)
-        if not status:
-            monitor.delete()
-            monitor = None
-            logging.warning(error)
-            raise ValueError(error)
         
         if site not in self.cnets or self.cnets[site] is None:
             self.cnets[site] = self.add_l3network(name=f"{self.prefix}_net_{site}", type="IPv6")
