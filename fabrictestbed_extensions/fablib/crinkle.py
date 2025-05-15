@@ -900,6 +900,7 @@ class CrinkleSlice(Slice):
                                 break
                         if not validated_nodes[endpoint_name]:
                             raise Exception(f"Could not place node {endpoint_name} due to a lack of free workers. Please try another site.")
+                    monitor_name = monitor.get_name()
                     for host_name, host in hostlist:
                         if host_name in endhosts:
                             continue
@@ -907,7 +908,6 @@ class CrinkleSlice(Slice):
                         if fablib._FablibManager__can_allocate_node_in_host(
                             host=host, node=monitor, allocated=allocated_comps, site=site)[0]:
                             monitor.set_host(host_name=host_name)
-                            monitor_name = monitor.get_name()
                             validated_nodes[monitor_name] = True
                             logging.info(f'Node {monitor_name} assigned to {host_name}')
                             break
