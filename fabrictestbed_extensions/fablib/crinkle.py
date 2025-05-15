@@ -926,6 +926,7 @@ class CrinkleSlice(Slice):
                 for host_name, host in hostlist:
                     if fablib._FablibManager__can_allocate_node_in_host(
                         host=host, node=node, allocated=allocated_comps, site=site)[0]:
+                        node.set_host(host_name=host_name)
                         validated_nodes[node_name] = True
                         logging.info(f"Node {node_name} assigned to {host_name}")
                         break
