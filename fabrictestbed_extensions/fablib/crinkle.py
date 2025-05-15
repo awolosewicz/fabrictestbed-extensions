@@ -928,6 +928,7 @@ class CrinkleSlice(Slice):
                         host=host, node=node, allocated=allocated_comps, site=site)[0]:
                         validated_nodes[node_name] = True
                         logging.info(f"Node {node_name} assigned to {host_name}")
+                        break
                 if not validated_nodes[node_name]:
                     raise Exception(f"Could not place node {node_name} due to a lack of free workers. Please try another site.")
 
