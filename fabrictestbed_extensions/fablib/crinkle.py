@@ -917,13 +917,13 @@ class CrinkleSlice(Slice):
                 node_name = node.get_name()
                 if validated_nodes[node_name]:
                     continue
-                allocated_comps = allocated.setdefault(host_name, {})
                 site_name = node.get_site()
                 site = sitenames_to_sites.setdefault(site_name, fabresources.get_site(site_name))
                 hosts = sitenames_to_hosts.setdefault(site_name, site.get_hosts())
                 hostlist = list(hosts.items())
                 hostlist = sorted(hostlist)
                 for host_name, host in hostlist:
+                    allocated_comps = allocated.setdefault(host_name, {})
                     if fablib._FablibManager__can_allocate_node_in_host(
                         host=host, node=node, allocated=allocated_comps, site=site)[0]:
                         node.set_host(host_name=host_name)
@@ -935,7 +935,7 @@ class CrinkleSlice(Slice):
 
 
             self.do_allocate_hosts = False
-            logging.info("Hosts allocated")
+            logging.info(f"Hosts allocated: {allocated}")
         
         return super().submit(wait=wait, wait_timeout=wait_timeout, wait_interval=wait_interval, progress=progress, wait_jupyter=wait_jupyter, post_boot_config=post_boot_config, wait_ssh=wait_ssh,
                        extra_ssh_keys=extra_ssh_keys, lease_start_time=lease_start_time, lease_end_time=lease_end_time, lease_in_hours=lease_in_hours, validate=validate)
