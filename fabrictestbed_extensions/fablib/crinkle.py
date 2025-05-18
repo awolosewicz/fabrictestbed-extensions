@@ -935,7 +935,13 @@ class CrinkleSlice(Slice):
 
 
             self.do_allocate_hosts = False
-            logging.info(f"Hosts allocated: {allocated}")
+            logging.info(f"Hosts allocated")
+            for host_name in allocated:
+                host = hosts[host_name]
+                allocated_comps = allocated[host_name]
+                logging.info(f"{host_name}: CPU {allocated_comps["core"]}/{host.get_core_available()} "
+                             f"RAM {allocated_comps["ram"]}/{host.get_ram_available()} "
+                             f"DISK {allocated_comps["disk"]}/{host.get_disk_available()}")
         
         return super().submit(wait=wait, wait_timeout=wait_timeout, wait_interval=wait_interval, progress=progress, wait_jupyter=wait_jupyter, post_boot_config=post_boot_config, wait_ssh=wait_ssh,
                        extra_ssh_keys=extra_ssh_keys, lease_start_time=lease_start_time, lease_end_time=lease_end_time, lease_in_hours=lease_in_hours, validate=validate)
