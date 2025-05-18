@@ -1010,10 +1010,6 @@ class CrinkleSlice(Slice):
                 ctr += 1
                 logging.info(f'{ctr}/{len(jobs)} jobs finished')
                 print(f'{ctr}/{len(jobs)} jobs finished')
-            logging.info(f"Saving Crinkle Data")
-            self.set_crinkle_data()
-            self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
-            self.update()
             logging.info(f"Rebooting Crinkle monitors")
             print("Rebooting Crinkle Resources")
             for monitor in self.monitors.values():
@@ -1048,6 +1044,10 @@ class CrinkleSlice(Slice):
             logging.info(f"Crinkle post_boot_config done")
             print("Crinkle post_boot_config done")
             self.did_post_boot = True
+            logging.info(f"Saving Crinkle Data")
+            self.set_crinkle_data()
+            self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
+            self.update()
 
     def get_non_crinkle_nodes(self, refresh: bool = False) -> list[Node]:
         """
