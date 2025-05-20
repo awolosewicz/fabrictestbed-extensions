@@ -607,10 +607,7 @@ class CrinkleSlice(Slice):
         
         monitor.set_capacities(cores=CrinkleMonitor.default_cores, ram=CrinkleMonitor.default_ram, disk=CrinkleMonitor.default_disk)
         
-        if site == "EDUKY":
-            monitor.set_image("default_ubuntu_22")
-        else:
-            monitor.set_image(CrinkleMonitor.default_image)
+        monitor.set_image(CrinkleMonitor.default_image)
 
         self.nodes = None
         self.interfaces = {}
