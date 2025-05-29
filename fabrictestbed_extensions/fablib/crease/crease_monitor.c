@@ -497,6 +497,7 @@ main(int argc, char *argv[])
 				printf("  -m    Set MAC addresses for analyzer (source then dest)\n");
 				printf("  -i    Set IP addresses for analyzer (source then dest)\n");
 				printf("  -h    Print this help\n");
+				printf("  -v    Print version\n");
 				exit(EXIT_SUCCESS);
 			case 'v':
 				printf("Crease Monitor v0.2\n");
