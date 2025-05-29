@@ -498,6 +498,9 @@ main(int argc, char *argv[])
 				printf("  -i    Set IP addresses for analyzer (source then dest)\n");
 				printf("  -h    Print this help\n");
 				exit(EXIT_SUCCESS);
+			case 'v':
+				printf("Crease Monitor v0.2\n");
+				exit(EXIT_SUCCESS);
 			case '?':
 				switch (optopt) {
 					case 'd':
