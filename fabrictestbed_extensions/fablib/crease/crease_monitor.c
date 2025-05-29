@@ -236,14 +236,16 @@ crinkle_forward(
 		struct rte_mbuf *cbuf = cbufs[i];
 
 		// Ether(14) + IPv6(40) + len(2) + 2xUID(32) + packet_w/o_trailer(data_len-16)
-		int size_delta = 88 + buf->data_len-16 - cbuf->data_len;
-		uint8_t *c;
-		if (size_delta > 0) {
-			c = (uint8_t *)rte_pktmbuf_append(cbuf, size_delta);
-		}
-		else {
-			c = rte_pktmbuf_mtod(cbuf, uint8_t*);
-		}
+		cbuf->data_len = 88 + buf->data_len-16;
+		cbuf->pkt_len = 88 + buf->data_len-16;
+		uint8_t *c = rte_pktmbuf_mtod(cbuf, uint8_t*);
+		// if (size_delta > 0) {
+		// 	c = (uint8_t *)rte_pktmbuf_append(cbuf, size_delta);
+		// 	cbuf->data_len += 88 + buf->data_len-16 - size_delta;
+		// }
+		// else {
+		// 	c = rte_pktmbuf_mtod(cbuf, uint8_t*);
+		// }
 		rte_mov64(c, ana_headers);
 		c += 54;
 		
@@ -276,13 +278,7 @@ crinkle_forward(
 		}
 		else {
 			uint8_t *trailer;
-			size_delta = 16 - rte_pktmbuf_tailroom(buf);
-			if (size_delta > 0) {
-				trailer = (uint8_t *)rte_pktmbuf_append(buf, size_delta);
-			}
-			else {
-				trailer = rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len);
-			}
+			trailer = (uint8_t *)rte_pktmbuf_append(buf, 16);
 			rte_mov16(trailer, (uint8_t *)uid_trailer);
 
 			rte_mov15_or_less(c, (uint8_t *)(&buf->data_len), 1);
@@ -334,11 +330,6 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t vport_to_devport[], uint16_t 
         lendian = true;
     }
 
-	struct rte_mbuf *cbufs[BURST_SIZE];
-	int retval = rte_pktmbuf_alloc_bulk(mbuf_pool, cbufs, BURST_SIZE);
-	if (retval != 0) {
-		printf("Failed to allocate clone bufs: Code %i\n", retval);
-	}
 	for (;;) {
 		/*
 		 * Receive packets on a port and forward them on the paired
@@ -359,6 +350,11 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t vport_to_devport[], uint16_t 
 
 			// timing
 			//uint64_t start = rte_get_tsc_cycles();
+			struct rte_mbuf *cbufs[BURST_SIZE];
+			int retval = rte_pktmbuf_alloc_bulk(mbuf_pool, cbufs, nb_rx);
+			if (retval != 0) {
+				printf("Failed to allocate clone bufs: Code %i\n", retval);
+			}
 			clock_gettime(CLOCK_REALTIME, &systime);
 			systime_ns = timespec64_to_ns(&systime);
 			crinkle_forward(bufs, cbufs, nb_rx, systime_ns, devport_to_vport[port]);
