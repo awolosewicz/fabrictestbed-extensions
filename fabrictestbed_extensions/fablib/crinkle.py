@@ -1013,6 +1013,25 @@ class CrinkleSlice(Slice):
                 ctr += 1
                 logging.info(f'{ctr}/{len(jobs)} jobs finished')
                 print(f'{ctr}/{len(jobs)} jobs finished')
+            logging.info(f'Starting SPADE')
+            self.analyzer.execute_thread(f'./{REMOTEWORKDIR}/SPADE/bin/spade debug')
+            time.sleep(5)
+            spade_control_commands = ('add reporter DSL /home/ubuntu/spade_pipe\n'
+                                    'add analyzer CommandLine\n'
+                                    'add storage Neo4j database=/home/ubuntu/spade_database\n')
+            self.analyzer.execute(f'echo -e "{spade_control_commands}" | ./{REMOTEWORKDIR}/SPADE/bin/spade control', quiet=True)
+            self.analyzer.upload_file(f"{CREASEDIR}/spade_reader.py", f"{REMOTEWORKDIR}/spade_reader.py")
+            self.analyzer.execute(f"sudo chmod u+x {REMOTEWORKDIR}/spade_reader.py")
+            if self.monitor_string == '':
+                self.reset_monitor_string()
+            self.analyzer.execute_thread(f"sudo ./{REMOTEWORKDIR}/spade_reader.py {self.monitor_string}")
+            logging.info(f"Saving slice data before rebooting monitors")
+            print("Saving slice data before rebooting monitors")
+            self.did_post_boot = True
+            logging.info(f"Saving Crinkle Data")
+            self.set_crinkle_data()
+            self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
+            self.update()
             logging.info(f"Rebooting Crinkle monitors")
             print("Rebooting Crinkle Resources")
             for monitor in self.monitors.values():
@@ -1032,25 +1051,8 @@ class CrinkleSlice(Slice):
                 ctr += 1
                 logging.info(f'{ctr}/{len(jobs)} jobs finished')
                 print(f'{ctr}/{len(jobs)} jobs finished')
-            logging.info(f'Starting SPADE')
-            self.analyzer.execute_thread(f'./{REMOTEWORKDIR}/SPADE/bin/spade debug')
-            time.sleep(5)
-            spade_control_commands = ('add reporter DSL /home/ubuntu/spade_pipe\n'
-                                    'add analyzer CommandLine\n'
-                                    'add storage Neo4j database=/home/ubuntu/spade_database\n')
-            self.analyzer.execute(f'echo -e "{spade_control_commands}" | ./{REMOTEWORKDIR}/SPADE/bin/spade control', quiet=True)
-            self.analyzer.upload_file(f"{CREASEDIR}/spade_reader.py", f"{REMOTEWORKDIR}/spade_reader.py")
-            self.analyzer.execute(f"sudo chmod u+x {REMOTEWORKDIR}/spade_reader.py")
-            if self.monitor_string == '':
-                self.reset_monitor_string()
-            self.analyzer.execute_thread(f"sudo ./{REMOTEWORKDIR}/spade_reader.py {self.monitor_string}")
             logging.info(f"Crinkle post_boot_config done")
             print("Crinkle post_boot_config done")
-            self.did_post_boot = True
-            logging.info(f"Saving Crinkle Data")
-            self.set_crinkle_data()
-            self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
-            self.update()
 
     def get_non_crinkle_nodes(self, refresh: bool = False) -> list[Node]:
         """
