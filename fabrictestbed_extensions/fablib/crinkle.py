@@ -678,7 +678,12 @@ class CrinkleSlice(Slice):
         subnet: ipaddress = None,
         gateway: ipaddress = None,
         user_data: dict = {},
-        sinks: list[Interface] = []
+        sinks: list[Interface] = [],
+        host: str = None,
+        site: str = None,
+        cores: int = CrinkleMonitor.default_cores,
+        ram: int = CrinkleMonitor.default_ram,
+        disk: int = CrinkleMonitor.default_disk
     ) -> CrinkleMonitor:
         """
         Adds an L2 network similarly to Slice.add_l2network, but additionally adds a
@@ -754,7 +759,14 @@ class CrinkleSlice(Slice):
             )
         type = str(rtn_nstype)
         monitor_site = interfaces[0].get_site()
-        monitor = self.add_monitor(name=f"{self.prefix}_monitor_{name}", site=monitor_site, net_name=name)
+        monitor = self.add_monitor(name=f"{self.prefix}_monitor_{name}",
+                                   site=monitor_site,
+                                   net_name=name,
+                                   site=site,
+                                   host=host,
+                                   cores=cores,
+                                   ram=ram,
+                                   disk=disk)
 
         if type == "L2Bridge":
             for iface in interfaces:
