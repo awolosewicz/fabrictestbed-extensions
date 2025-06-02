@@ -19,9 +19,13 @@
 #define RX_RING_SIZE 1024
 #define TX_RING_SIZE 1024
 
-#define NUM_MBUFS 8191
-#define MBUF_CACHE_SIZE 250
+#define NUM_MBUFS 16383
+#define MBUF_CACHE_SIZE 127
 #define BURST_SIZE 32
+
+#define	PKT_MBUF_DATA_SIZE	RTE_MBUF_DEFAULT_BUF_SIZE
+#define	HDR_MBUF_DATA_SIZE	128 + RTE_PKTMBUF_HEADROOM
+#define	TLR_MBUF_DATA_SIZE	128 + RTE_PKTMBUF_HEADROOM
 
 #define NSEC_PER_SEC        1000000000L
 
@@ -29,19 +33,36 @@
 #define MONPROT0 0x65
 #define MONPROT1 0x87
 
-// HW timestamping code derived from rxtx_calbacks
-static int hwts_dynfield_offset = -1;
+#ifdef PROFILING
+#define TIME_BUILD_TRAILER 0
+#define TIME_ADD_TRAILER 1
+#define TIME_ADD_HEADERS 2
+#define TIME_OTHER 3
+#define TIME_TX_PKTS 4
+#define TIME_GET_TIME 5
 
-static inline rte_mbuf_timestamp_t *
-hwts_field(struct rte_mbuf *mbuf)
-{
-	return RTE_MBUF_DYNFIELD(mbuf,
-			hwts_dynfield_offset, rte_mbuf_timestamp_t *);
-}
-int hw_timestamping = 0;
+#define TIME_AVG_BUILD_TRAILER 6
+#define TIME_AVG_ADD_TRAILER 7
+#define TIME_AVG_ADD_HEADERS 8
+#define TIME_AVG_OTHER 9
+#define TIME_AVG_TX_PKTS 10
+#define TIME_AVG_GET_TIME 11
 
-#define TICKS_PER_CYCLE_SHIFT 16
-static uint64_t ticks_per_cycle_mult;
+#define TIME_MAX_BUILD_TRAILER 12
+#define TIME_MAX_ADD_TRAILER 13
+#define TIME_MAX_ADD_HEADERS 14
+#define TIME_MAX_OTHER 15
+#define TIME_MAX_TX_PKTS 16
+#define TIME_MAX_GET_TIME 17
+
+#define TIME_MDEV_BUILD_TRAILER 18
+#define TIME_MDEV_ADD_TRAILER 19
+#define TIME_MDEV_ADD_HEADERS 20
+#define TIME_MDEV_OTHER 21
+#define TIME_MDEV_TX_PKTS 22
+#define TIME_MDEV_GET_TIME 23
+#endif
+
 static uint64_t tsc_hz;
 
 static inline uint64_t timespec64_to_ns(const struct timespec *ts)
@@ -50,12 +71,16 @@ static inline uint64_t timespec64_to_ns(const struct timespec *ts)
 }
 
 /* basicfwd.c: Basic DPDK skeleton forwarding example. */
-// timing
-//static uint64_t measures[16];
+#ifdef PROFILING
+static uint64_t measures[24];
+uint64_t start = 0;
+uint64_t pop_size = 0;
+#endif
 unsigned char ana_headers[64];
 // Ether(14) + IPv6(40) + len(2) + 2xUID(32)
 const uint16_t ana_size = 88;
 uint64_t mon_id;
+static struct rte_mempool *packet_pool, *header_pool, *clone_pool, *trailer_pool;
 
 /*
  * Initializes a given port using global settings and with the RX buffers
@@ -92,20 +117,6 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 		port_conf.txmode.offloads |=
 			RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 
-	if (hw_timestamping) {
-		if (!(dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TIMESTAMP)) {
-			printf("\nERROR: Port %u does not support hardware timestamping\n"
-					, port);
-			return -1;
-		}
-		port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
-		rte_mbuf_dyn_rx_timestamp_register(&hwts_dynfield_offset, NULL);
-		if (hwts_dynfield_offset < 0) {
-			printf("ERROR: Failed to register timestamp field\n");
-			return -rte_errno;
-		}
-	}
-
 	/* Configure the Ethernet device. */
 	retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
 	if (retval != 0)
@@ -140,29 +151,6 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 	if (retval < 0)
 		return retval;
 
-	if (hw_timestamping && ticks_per_cycle_mult  == 0) {
-		uint64_t cycles_base = rte_rdtsc();
-		uint64_t ticks_base;
-		retval = rte_eth_read_clock(port, &ticks_base);
-		if (retval != 0)
-			return retval;
-		rte_delay_ms(100);
-		uint64_t cycles = rte_rdtsc();
-		uint64_t ticks;
-		rte_eth_read_clock(port, &ticks);
-		uint64_t c_freq = cycles - cycles_base;
-		uint64_t t_freq = ticks - ticks_base;
-		double freq_mult = (double)c_freq / t_freq;
-		printf("TSC Freq ~= %" PRIu64
-				"\nHW Freq ~= %" PRIu64
-				"\nRatio : %f\n",
-				c_freq * 10, t_freq * 10, freq_mult);
-		/* TSC will be faster than internal ticks so freq_mult is > 0
-			* We convert the multiplication to an integer shift & mult
-			*/
-		ticks_per_cycle_mult = (1 << TICKS_PER_CYCLE_SHIFT) / freq_mult;
-	}
-
 	/* Display the port MAC address. */
 	struct rte_ether_addr addr;
 	retval = rte_eth_macaddr_get(port, &addr);
@@ -185,12 +173,6 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 	return 0;
 }
 /* >8 End of main functional part of port initialization. */
-
-static inline uint64_t
-hwts_to_ns(rte_mbuf_timestamp_t hwts) {
-	uint64_t cycles = (hwts * ticks_per_cycle_mult) >> TICKS_PER_CYCLE_SHIFT;
-	return (cycles / tsc_hz) * NSEC_PER_SEC;
-}
 
 bool lendian = false;
 
@@ -234,8 +216,14 @@ crinkle_forward(
 	const uint64_t port)
 {
 	for (int i = 0; i < nb_pkts; ++i) {
+		#ifdef PROFILING
+		start = rte_get_tsc_cycles();
+		#endif
 		struct rte_mbuf *buf = bufs[i];
-		struct rte_mbuf *cbuf = cbufs[i];
+		struct rte_mbuf *cbuf;
+		if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
+			continue;
+		}
 		uint8_t *c;
 		
 		// candidate_trailer points to the lower 4 bytes, which are the ts check and MONPROT
@@ -243,7 +231,11 @@ crinkle_forward(
 		uint32_t candidate_trailer = *candidate_trailer_ptr;
 		// The ts corresponding to ts check
 		uint32_t ts_lower = *(candidate_trailer_ptr-2);
+		#ifdef PROFILING
+		measures[TIME_OTHER] = rte_get_tsc_cycles() - start;
 
+		start = rte_get_tsc_cycles();
+		#endif
 		uint64_t uid_trailer[2];
 		uid_trailer[0] = systime_ns + i;
 		uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uid_trailer[0] << 16) & 0x00000000FFFF0000) + MONPROT;
@@ -253,39 +245,44 @@ crinkle_forward(
 			uid_trailer[0] = swap_endian_long(uid_trailer[0]);
 			uid_trailer[1] = swap_endian_long(uid_trailer[1]);
 		}
+		#ifdef PROFILING
+		measures[TIME_BUILD_TRAILER] = rte_get_tsc_cycles() - start;
+		#endif
 
 		// Check for existing UUID trailer
 		if ((candidate_trailer & 0x0000FFFF) != MONPROT || (candidate_trailer >> 16) != (ts_lower & 0x0000FFFF)) {
+			#ifdef PROFILING
+			start = rte_get_tsc_cycles();
+			#endif
 			uint8_t *trailer;
-			trailer = (uint8_t *)rte_pktmbuf_append(buf, 16);
-			if (trailer == NULL) {
+			if (unlikely((trailer = (uint8_t *)rte_pktmbuf_append(buf, 16)) == NULL)) {
 				printf("Failed to append trailer to packet %d\n", i);
 				rte_pktmbuf_free(cbuf);
 				continue;
 			}
 			rte_mov16(trailer, (uint8_t *)uid_trailer);
-			c = (uint8_t*)rte_pktmbuf_append(cbuf, ana_size+buf->data_len-16);
-			if (c == NULL) {
-				printf("Failed to append clone packet %d\n", i);
-				rte_pktmbuf_free(cbuf);
-				continue;
-			}
-			rte_memcpy(c+ana_size, rte_pktmbuf_mtod(buf, uint8_t*), buf->data_len-16);
+			#ifdef PROFILING
+			measures[TIME_ADD_TRAILER] = rte_get_tsc_cycles() - start;
+			#endif
 		}
-		else {
-			c = (uint8_t*)rte_pktmbuf_append(cbuf, ana_size+buf->data_len);
-			if (c == NULL) {
-				printf("Failed to append clone packet %d\n", i);
-				rte_pktmbuf_free(cbuf);
-				continue;
-			}
-			rte_memcpy(c+ana_size, rte_pktmbuf_mtod(buf, uint8_t*), buf->data_len-16);
+
+		#ifdef PROFILING
+		start = rte_get_tsc_cycles();
+		#endif
+		if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
+			printf("Failed to append clone packet %d\n", i);
+			rte_pktmbuf_free(cbuf);
+			continue;
 		}
 		rte_mov64(c, ana_headers);
 		rte_mov15_or_less(c+54, (uint8_t *)(&buf->data_len), 1);
 		rte_mov15_or_less(c+55, (uint8_t *)(&buf->data_len) + 1, 1);
 		rte_mov16(c+56, (uint8_t *)uid_trailer);
 		rte_mov16(c+72, (uint8_t *)uid_trailer);
+		cbufs[i] = cbuf;
+		#ifdef PROFILING
+		measures[TIME_ADD_HEADERS] = rte_get_tsc_cycles() - start;
+		#endif
 	}
 }
 
@@ -296,7 +293,7 @@ crinkle_forward(
 
  /* Basic forwarding application lcore. 8< */
 static __rte_noreturn void
-lcore_main(struct rte_mempool *mbuf_pool, uint16_t vport_to_devport[], uint16_t devport_to_vport[])
+lcore_main(uint16_t vport_to_devport[], uint16_t devport_to_vport[])
 {
 	uint16_t port;
 
@@ -316,8 +313,6 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t vport_to_devport[], uint16_t 
 			rte_lcore_id());
 
 	/* Main work of application loop. 8< */
-	// timing variable
-	//uint8_t ctr = 0;
 	struct timespec systime;
 	uint64_t systime_ns;
 
@@ -346,19 +341,26 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t vport_to_devport[], uint16_t 
 			if (unlikely(nb_rx == 0))
 				continue;
 
-			// timing
-			//uint64_t start = rte_get_tsc_cycles();
-			struct rte_mbuf *cbufs[BURST_SIZE];;
-			int retval = rte_pktmbuf_alloc_bulk(mbuf_pool, cbufs, nb_rx);
-			if (retval != 0) {
-				printf("Failed to allocate clone bufs: Code %i\n", retval);
-			}
+			// struct rte_mbuf *cbufs[BURST_SIZE];
+			// int retval = rte_pktmbuf_alloc_bulk(mbuf_pool, cbufs, nb_rx);
+			// if (retval != 0) {
+			// 	printf("Failed to allocate clone bufs: Code %i\n", retval);
+			// }
+			#ifdef PROFILING
+			start = rte_get_tsc_cycles();
+			#endif
 			clock_gettime(CLOCK_REALTIME, &systime);
 			systime_ns = timespec64_to_ns(&systime);
+			#ifdef PROFILING
+			measures[TIME_GET_TIME] = rte_get_tsc_cycles() - start;
+			#endif
+			struct rte_mbuf *cbufs[BURST_SIZE];
 			crinkle_forward(bufs, cbufs, nb_rx, systime_ns, devport_to_vport[port]);
-			// timing
-			//uint64_t end = rte_get_tsc_cycles();
 
+
+			#ifdef PROFILING
+			start = rte_get_tsc_cycles();
+			#endif
 			/* Send burst of TX packets, to second port of pair. */
 			uint16_t nb_tx = 0;
 			if (port == vport_to_devport[1]) {
@@ -384,18 +386,34 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t vport_to_devport[], uint16_t 
 				for (buf = nb_tx; buf < nb_rx; buf++)
 					rte_pktmbuf_free(cbufs[buf]);
 			}
+			#ifdef PROFILING
+			measures[TIME_TX_PKTS] = rte_get_tsc_cycles() - start;
+			#endif
 
 			// timing
-			// measures[ctr++] = end - start;
-			// if (ctr == sizeof(measures)/sizeof(measures[0])) {
-			// 	printf("%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
-			// 		   measures[0], measures[1], measures[2], measures[3],
-			// 		   measures[4], measures[5], measures[6], measures[7],
-			// 		   measures[8], measures[9], measures[10], measures[11],
-			// 		   measures[12], measures[13], measures[14], measures[15]);
-			// 	fflush(stdout);
-			// 	ctr = 0;
-			// }
+			#ifdef PROFILING
+			uint64_t delta1 = 0;
+			uint64_t delta2 = 0;
+			if (nb_tx == 0) {
+				continue;
+			}
+			++pop_size;
+			for (int i = 0; i < 6; ++i) {
+				delta1 = measures[i] - measures[i+6];
+				measures[i+6] = measures[i+6] + (delta1 / pop_size);
+				delta2 = measures[i] - measures[i+6];
+				measures[i+12] = RTE_MAX(measures[i+12], measures[i]);
+				measures[i+18] = measures[i+18] + (delta1 * delta2);
+			}
+			if (pop_size % 100 == 0) {
+				printf("Pop\t%lu\n", pop_size);
+				for (int i = 0; i < 6; ++i) {
+					printf("Time\t%d\t%lu\t%lu\t%lu\t%lu\n", i,
+						   measures[i], measures[i+6], measures[i+12], measures[i+18]);
+				}
+				fflush(stdout);
+			}
+			#endif
 		}
 	}
 	/* >8 End of loop. */
@@ -411,7 +429,6 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t vport_to_devport[], uint16_t 
 int
 main(int argc, char *argv[])
 {
-	struct rte_mempool *mbuf_pool;
 	unsigned nb_ports;
 	uint16_t portid;
 
@@ -498,7 +515,7 @@ main(int argc, char *argv[])
 				printf("  -v    Print version\n");
 				exit(EXIT_SUCCESS);
 			case 'v':
-				printf("Crease Monitor v0.2\n");
+				printf("Crease Monitor v0.3\n");
 				exit(EXIT_SUCCESS);
 			case '?':
 				switch (optopt) {
@@ -529,19 +546,30 @@ main(int argc, char *argv[])
 		}
 	}
 
-	/* Creates a new mempool in memory to hold the mbufs. */
+	packet_pool = rte_pktmbuf_pool_create("packet_pool", NUM_MBUFS, MBUF_CACHE_SIZE,
+		0, PKT_MBUF_DATA_SIZE, rte_socket_id());
 
-	/* Allocates mempool to hold the mbufs. 8< */
-	mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL", NUM_MBUFS * nb_ports,
-		MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
-	/* >8 End of allocating mempool to hold mbuf. */
+	if (packet_pool == NULL)
+		rte_exit(EXIT_FAILURE, "Cannot init packet mbuf pool\n");
 
-	if (mbuf_pool == NULL)
-		rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
+	header_pool = rte_pktmbuf_pool_create("header_pool", NUM_MBUFS, MBUF_CACHE_SIZE,
+		0, HDR_MBUF_DATA_SIZE, rte_socket_id());
+
+	trailer_pool = rte_pktmbuf_pool_create("trailer_pool", NUM_MBUFS, MBUF_CACHE_SIZE,
+		0, TLR_MBUF_DATA_SIZE, rte_socket_id());
+
+	if (header_pool == NULL)
+		rte_exit(EXIT_FAILURE, "Cannot init header mbuf pool\n");
+
+	clone_pool = rte_pktmbuf_pool_create("clone_pool", NUM_MBUFS , MBUF_CACHE_SIZE,
+		0, 0, rte_socket_id());
+
+	if (clone_pool == NULL)
+		rte_exit(EXIT_FAILURE, "Cannot init clone mbuf pool\n");
 
 	/* Initializing all ports. 8< */
 	RTE_ETH_FOREACH_DEV(portid)
-		if (port_init(portid, mbuf_pool) != 0)
+		if (port_init(portid, packet_pool) != 0)
 			rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16 "\n",
 					portid);
 	/* >8 End of initializing all ports. */
@@ -553,7 +581,7 @@ main(int argc, char *argv[])
 	printf("Running at %lu hz\n", tsc_hz);
 
 	/* Call lcore_main on the main core only. Called on single lcore. 8< */
-	lcore_main(mbuf_pool, vport_to_devport, devport_to_vport);
+	lcore_main(vport_to_devport, devport_to_vport);
 	/* >8 End of called on single lcore. */
 
 	/* clean up the EAL */
