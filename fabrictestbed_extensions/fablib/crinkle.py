@@ -53,7 +53,11 @@ class MonNetData(enum.IntEnum):
     PORTNUM = 4
 
 class CrinkleAnalyzer(Node):
+
     default_image = "crease_ubuntu_22"
+    default_cores = 4
+    default_ram = 16
+    default_disk = 500
 
     def __init__(
         self,
@@ -457,9 +461,9 @@ class CrinkleSlice(Slice):
     def add_analyzer(
             self,
             site: str = None,
-            cores: int = 4,
-            ram: int = 16,
-            disk: int = 500,
+            cores: int = CrinkleAnalyzer.default_cores,
+            ram: int = CrinkleAnalyzer.default_ram,
+            disk: int = CrinkleAnalyzer.default_disk,
             instance_type: str = None,
             host: str = None,
             user_data: dict = {},
