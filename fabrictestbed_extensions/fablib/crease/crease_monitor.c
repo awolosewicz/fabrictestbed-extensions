@@ -80,7 +80,7 @@ unsigned char ana_headers[64];
 // Ether(14) + IPv6(40) + len(2) + 2xUID(32)
 const uint16_t ana_size = 88;
 uint64_t mon_id;
-static struct rte_mempool *packet_pool, *header_pool, *clone_pool, *trailer_pool;
+static struct rte_mempool *packet_pool, *clone_pool;
 
 /*
  * Initializes a given port using global settings and with the RX buffers
@@ -176,6 +176,12 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 
 bool lendian = false;
 
+static inline uint16_t
+swap_endian_short(uint16_t value) {
+    return ((value >> 8)  & 0x00FF) |
+           ((value << 8)  & 0xFF00);
+}
+
 static inline uint32_t
 swap_endian(uint32_t value) {
     return ((value >> 24) & 0x000000FF) |
@@ -239,7 +245,9 @@ crinkle_forward(
 		uint64_t uid_trailer[2];
 		uid_trailer[0] = systime_ns + i;
 		uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uid_trailer[0] << 16) & 0x00000000FFFF0000) + MONPROT;
+		uint16_t pkt_size = buf->data_len+16;
 		if (lendian) {
+			pkt_size = swap_endian_short(pkt_size);
 			candidate_trailer = swap_endian(candidate_trailer);
 			ts_lower = swap_endian(ts_lower);
 			uid_trailer[0] = swap_endian_long(uid_trailer[0]);
@@ -269,16 +277,16 @@ crinkle_forward(
 		#ifdef PROFILING
 		start = rte_get_tsc_cycles();
 		#endif
+		uint8_t *trailer = rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16);
 		if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
 			printf("Failed to append clone packet %d\n", i);
 			rte_pktmbuf_free(cbuf);
 			continue;
 		}
 		rte_mov64(c, ana_headers);
-		rte_mov15_or_less(c+54, (uint8_t *)(&buf->data_len), 1);
-		rte_mov15_or_less(c+55, (uint8_t *)(&buf->data_len) + 1, 1);
+		rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
 		rte_mov16(c+56, (uint8_t *)uid_trailer);
-		rte_mov16(c+72, (uint8_t *)uid_trailer);
+		rte_mov16(c+72, trailer);
 		cbufs[i] = cbuf;
 		#ifdef PROFILING
 		measures[TIME_ADD_HEADERS] = rte_get_tsc_cycles() - start;
@@ -551,15 +559,6 @@ main(int argc, char *argv[])
 
 	if (packet_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init packet mbuf pool\n");
-
-	header_pool = rte_pktmbuf_pool_create("header_pool", NUM_MBUFS, MBUF_CACHE_SIZE,
-		0, HDR_MBUF_DATA_SIZE, rte_socket_id());
-
-	trailer_pool = rte_pktmbuf_pool_create("trailer_pool", NUM_MBUFS, MBUF_CACHE_SIZE,
-		0, TLR_MBUF_DATA_SIZE, rte_socket_id());
-
-	if (header_pool == NULL)
-		rte_exit(EXIT_FAILURE, "Cannot init header mbuf pool\n");
 
 	clone_pool = rte_pktmbuf_pool_create("clone_pool", NUM_MBUFS , MBUF_CACHE_SIZE,
 		0, 0, rte_socket_id());
