@@ -568,9 +568,18 @@ class CrinkleSlice(Slice):
     
     def add_monitor(
             self,
-            name: str = None,
+            name: str,
             site: str = None,
+            cores: int = CrinkleMonitor.default_cores,
+            ram: int = CrinkleMonitor.default_ram,
+            disk: int = CrinkleMonitor.default_disk,
+            image: str = CrinkleMonitor.default_image,
+            instance_type: str = None,
+            host: str = None,
             user_data: dict = {},
+            avoid: list[str] = [],
+            validate: bool = False,
+            raise_exception: bool = False,
             net_name: str = None
     ) -> CrinkleMonitor:
         """
@@ -605,9 +614,12 @@ class CrinkleSlice(Slice):
             user_data_working[k] = v
         monitor.set_user_data(user_data_working)
         
-        monitor.set_capacities(cores=CrinkleMonitor.default_cores, ram=CrinkleMonitor.default_ram, disk=CrinkleMonitor.default_disk)
+        monitor.set_capacities(cores=cores, ram=ram, disk=disk)
         
-        monitor.set_image(CrinkleMonitor.default_image)
+        monitor.set_image(image)
+
+        if host:
+            monitor.set_host(host)
 
         self.nodes = None
         self.interfaces = {}
