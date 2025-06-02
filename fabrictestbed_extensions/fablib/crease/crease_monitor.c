@@ -53,6 +53,8 @@ static inline uint64_t timespec64_to_ns(const struct timespec *ts)
 // timing
 //static uint64_t measures[16];
 unsigned char ana_headers[64];
+// Ether(14) + IPv6(40) + len(2) + 2xUID(32)
+const uint16_t ana_size = 88;
 uint64_t mon_id;
 
 /*
@@ -234,60 +236,56 @@ crinkle_forward(
 	for (int i = 0; i < nb_pkts; ++i) {
 		struct rte_mbuf *buf = bufs[i];
 		struct rte_mbuf *cbuf = cbufs[i];
-
-		// Ether(14) + IPv6(40) + len(2) + 2xUID(32) + packet_w/o_trailer(data_len-16)
-		cbuf->data_len = 88 + buf->data_len-16;
-		cbuf->pkt_len = 88 + buf->data_len-16;
-		uint8_t *c = rte_pktmbuf_mtod(cbuf, uint8_t*);
-		// if (size_delta > 0) {
-		// 	c = (uint8_t *)rte_pktmbuf_append(cbuf, size_delta);
-		// 	cbuf->data_len += 88 + buf->data_len-16 - size_delta;
-		// }
-		// else {
-		// 	c = rte_pktmbuf_mtod(cbuf, uint8_t*);
-		// }
-		rte_mov64(c, ana_headers);
-		c += 54;
+		uint8_t *c;
 		
 		// candidate_trailer points to the lower 4 bytes, which are the ts check and MONPROT
 		uint32_t *candidate_trailer_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
 		uint32_t candidate_trailer = *candidate_trailer_ptr;
 		// The ts corresponding to ts check
 		uint32_t ts_lower = *(candidate_trailer_ptr-2);
-		if (lendian) {
-			candidate_trailer = swap_endian(candidate_trailer);
-			ts_lower = swap_endian(ts_lower);
-		}
 
 		uint64_t uid_trailer[2];
 		uid_trailer[0] = systime_ns + i;
 		uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uid_trailer[0] << 16) & 0x00000000FFFF0000) + MONPROT;
 		if (lendian) {
+			candidate_trailer = swap_endian(candidate_trailer);
+			ts_lower = swap_endian(ts_lower);
 			uid_trailer[0] = swap_endian_long(uid_trailer[0]);
 			uid_trailer[1] = swap_endian_long(uid_trailer[1]);
 		}
 
-		// If the packet already has a UID trailer
-		if ((candidate_trailer & 0x0000FFFF) == MONPROT && (candidate_trailer >> 16) == (ts_lower & 0x0000FFFF)) {
-			rte_mov15_or_less(c, (uint8_t *)(&buf->data_len), 1);
-			rte_mov15_or_less(c+1, (uint8_t *)(&buf->data_len) + 1, 1);
-			rte_mov16(c+2, (uint8_t *)uid_trailer);
-			rte_mov16(c+18, (uint8_t *)candidate_trailer_ptr - 12);
-			uint8_t * buf_start = rte_pktmbuf_mtod(buf, uint8_t*);
-			rte_memcpy(c+34, buf_start, buf->data_len-16);
-		}
-		else {
+		// Check for existing UUID trailer
+		if ((candidate_trailer & 0x0000FFFF) != MONPROT || (candidate_trailer >> 16) != (ts_lower & 0x0000FFFF)) {
 			uint8_t *trailer;
 			trailer = (uint8_t *)rte_pktmbuf_append(buf, 16);
+			if (trailer == NULL) {
+				printf("Failed to append trailer to packet %d\n", i);
+				rte_pktmbuf_free(cbuf);
+				continue;
+			}
 			rte_mov16(trailer, (uint8_t *)uid_trailer);
-
-			rte_mov15_or_less(c, (uint8_t *)(&buf->data_len), 1);
-			rte_mov15_or_less(c+1, (uint8_t *)(&buf->data_len) + 1, 1);
-			rte_mov16(c+2, (uint8_t *)uid_trailer);
-			rte_mov16(c+18, (uint8_t *)uid_trailer);
-			uint8_t * buf_start = rte_pktmbuf_mtod(buf, uint8_t*);
-			rte_memcpy(c+34, buf_start, buf->data_len-16);
+			c = (uint8_t*)rte_pktmbuf_append(cbuf, ana_size+buf->data_len-16);
+			if (c == NULL) {
+				printf("Failed to append clone packet %d\n", i);
+				rte_pktmbuf_free(cbuf);
+				continue;
+			}
+			rte_memcpy(c+ana_size, rte_pktmbuf_mtod(buf, uint8_t*), buf->data_len-16);
 		}
+		else {
+			c = (uint8_t*)rte_pktmbuf_append(cbuf, ana_size+buf->data_len);
+			if (c == NULL) {
+				printf("Failed to append clone packet %d\n", i);
+				rte_pktmbuf_free(cbuf);
+				continue;
+			}
+			rte_memcpy(c+ana_size, rte_pktmbuf_mtod(buf, uint8_t*), buf->data_len-16);
+		}
+		rte_mov64(c, ana_headers);
+		rte_mov15_or_less(c+54, (uint8_t *)(&buf->data_len), 1);
+		rte_mov15_or_less(c+55, (uint8_t *)(&buf->data_len) + 1, 1);
+		rte_mov16(c+56, (uint8_t *)uid_trailer);
+		rte_mov16(c+72, (uint8_t *)uid_trailer);
 	}
 }
 
@@ -350,7 +348,7 @@ lcore_main(struct rte_mempool *mbuf_pool, uint16_t vport_to_devport[], uint16_t 
 
 			// timing
 			//uint64_t start = rte_get_tsc_cycles();
-			struct rte_mbuf *cbufs[BURST_SIZE];
+			struct rte_mbuf *cbufs[BURST_SIZE];;
 			int retval = rte_pktmbuf_alloc_bulk(mbuf_pool, cbufs, nb_rx);
 			if (retval != 0) {
 				printf("Failed to allocate clone bufs: Code %i\n", retval);
@@ -443,7 +441,7 @@ main(int argc, char *argv[])
 	bool macdst = false;
 	bool ipdst = false;
 
-	while ((arg = getopt(argc, argv, "n:d:m:i:h")) != -1) {
+	while ((arg = getopt(argc, argv, "n:d:m:i:hv")) != -1) {
 		switch (arg) {
 			case 'n':
 				mon_id = strtol(optarg, NULL, 0);
