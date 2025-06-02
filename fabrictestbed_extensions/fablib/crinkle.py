@@ -758,11 +758,11 @@ class CrinkleSlice(Slice):
                 f"Invalid Network Service: Networks are limited to 2 unique sites. Site requested: {sites}"
             )
         type = str(rtn_nstype)
-        monitor_site = interfaces[0].get_site()
+        if not site:
+            site = interfaces[0].get_site()
         monitor = self.add_monitor(name=f"{self.prefix}_monitor_{name}",
-                                   site=monitor_site,
-                                   net_name=name,
                                    site=site,
+                                   net_name=name,
                                    host=host,
                                    cores=cores,
                                    ram=ram,
