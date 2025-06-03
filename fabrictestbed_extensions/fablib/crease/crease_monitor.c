@@ -16,12 +16,16 @@
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
 
-#define RX_RING_SIZE 1024
-#define TX_RING_SIZE 1024
-
 #define NUM_MBUFS 16383
 #define MBUF_CACHE_SIZE 127
 #define BURST_SIZE 32
+#define BURST_TX_DRAIN_US 100 /* TX drain every ~100us */
+/* Configure how many packets ahead to prefetch, when reading packets */
+#define PREFETCH_OFFSET	3
+
+/* allow max jumbo frame 9.5 KB */
+#define	JUMBO_FRAME_MAX_SIZE	0x2600
+#define MAX_RX_MTU 1500
 
 #define	PKT_MBUF_DATA_SIZE	RTE_MBUF_DEFAULT_BUF_SIZE
 #define	HDR_MBUF_DATA_SIZE	128 + RTE_PKTMBUF_HEADROOM
@@ -32,6 +36,8 @@
 #define MONPROT 0x6587
 #define MONPROT0 0x65
 #define MONPROT1 0x87
+
+#define MAX_PORTS 3
 
 #ifdef PROFILING
 #define TIME_BUILD_TRAILER 0
@@ -82,97 +88,40 @@ const uint16_t ana_size = 88;
 uint64_t mon_id;
 static struct rte_mempool *packet_pool, *clone_pool;
 
-/*
- * Initializes a given port using global settings and with the RX buffers
- * coming from the mbuf_pool passed as a parameter.
- */
+static int rx_queue_per_lcore = 1;
 
-/* Main functional part of port initialization. 8< */
-static inline int
-port_init(uint16_t port, struct rte_mempool *mbuf_pool)
-{
-	struct rte_eth_conf port_conf;
-	const uint16_t rx_rings = 1, tx_rings = 1;
-	uint16_t nb_rxd = RX_RING_SIZE;
-	uint16_t nb_txd = TX_RING_SIZE;
-	int retval;
-	uint16_t q;
-	struct rte_eth_dev_info dev_info;
-	struct rte_eth_rxconf rxconf;
-	struct rte_eth_txconf txconf;
+#define RX_RING_SIZE 1024
+#define TX_RING_SIZE 1024
+static uint16_t nb_rxd = RX_RING_SIZE;
+static uint16_t nb_txd = TX_RING_SIZE;
+/* ethernet addresses of ports */
+static struct rte_ether_addr ports_eth_addr[MAX_PORTS];
 
-	if (!rte_eth_dev_is_valid_port(port))
-		return -1;
+static uint16_t vport_to_devport[MAX_PORTS];
+static uint16_t devport_to_vport[MAX_PORTS];
 
-	memset(&port_conf, 0, sizeof(struct rte_eth_conf));
+struct mbuf_table {
+	uint16_t len;
+	struct rte_mbuf *m_table[BURST_SIZE];
+};
 
-	retval = rte_eth_dev_info_get(port, &dev_info);
-	if (retval != 0) {
-		printf("Error during getting device (port %u) info: %s\n",
-				port, strerror(-retval));
-		return retval;
-	}
+#define MAX_RX_QUEUE_PER_LCORE 16
+#define MAX_TX_QUEUE_PER_PORT 16
+struct __rte_cache_aligned lcore_queue_conf {
+	uint64_t tx_tsc;
+	uint16_t n_rx_queue;
+	uint8_t rx_queue_list[MAX_RX_QUEUE_PER_LCORE];
+	uint16_t tx_queue_id[MAX_PORTS];
+	struct mbuf_table tx_mbufs[MAX_PORTS];
+};
+static struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
-	if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
-		port_conf.txmode.offloads |=
-			RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
-
-	/* Configure the Ethernet device. */
-	retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
-	if (retval != 0)
-		return retval;
-
-	retval = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rxd, &nb_txd);
-	if (retval != 0)
-		return retval;
-
-	rxconf = dev_info.default_rxconf;
-	/* Allocate and set up 1 RX queue per Ethernet port. */
-	for (q = 0; q < rx_rings; q++) {
-		retval = rte_eth_rx_queue_setup(port, q, nb_rxd,
-				rte_eth_dev_socket_id(port), &rxconf, mbuf_pool);
-		if (retval < 0)
-			return retval;
-	}
-
-	txconf = dev_info.default_txconf;
-	txconf.offloads = port_conf.txmode.offloads;
-	/* Allocate and set up 1 TX queue per Ethernet port. */
-	for (q = 0; q < tx_rings; q++) {
-		retval = rte_eth_tx_queue_setup(port, q, nb_txd,
-				rte_eth_dev_socket_id(port), &txconf);
-		if (retval < 0)
-			return retval;
-	}
-
-	/* Starting Ethernet port. 8< */
-	retval = rte_eth_dev_start(port);
-	/* >8 End of starting of ethernet port. */
-	if (retval < 0)
-		return retval;
-
-	/* Display the port MAC address. */
-	struct rte_ether_addr addr;
-	retval = rte_eth_macaddr_get(port, &addr);
-	if (retval < 0) {
-		printf("Failed to get MAC address on port %u: %s\n",
-			port, rte_strerror(-retval));
-		return retval;
-	}
-
-	printf("Port %u MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8
-			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n",
-			port, RTE_ETHER_ADDR_BYTES(&addr));
-
-	/* Enable RX in promiscuous mode for the Ethernet device. */
-	retval = rte_eth_promiscuous_enable(port);
-	/* End of setting RX port in promiscuous mode. */
-	if (retval != 0)
-		return retval;
-
-	return 0;
-}
-/* >8 End of main functional part of port initialization. */
+static struct rte_eth_conf port_conf = {
+	.rxmode = {
+		.mtu = MAX_RX_MTU,
+	},
+	.txmode = {},
+};
 
 bool lendian = false;
 
@@ -202,6 +151,54 @@ swap_endian_long(uint64_t value) {
            ((value << 56) & 0xFF00000000000000);
 }
 
+static void
+print_ethaddr(const char *name, struct rte_ether_addr *eth_addr)
+{
+	char buf[RTE_ETHER_ADDR_FMT_SIZE];
+	rte_ether_format_addr(buf, RTE_ETHER_ADDR_FMT_SIZE, eth_addr);
+	printf("%s%s", name, buf);
+}
+
+/* Send burst of packets on an output interface */
+static void
+send_burst(struct lcore_queue_conf *qconf, uint16_t port)
+{
+	struct rte_mbuf **m_table;
+	uint16_t n, queueid;
+	int ret;
+
+	queueid = qconf->tx_queue_id[port];
+	m_table = (struct rte_mbuf **)qconf->tx_mbufs[port].m_table;
+	n = qconf->tx_mbufs[port].len;
+
+	ret = rte_eth_tx_burst(port, queueid, m_table, n);
+	while (unlikely (ret < n)) {
+		rte_pktmbuf_free(m_table[ret]);
+		ret++;
+	}
+
+	qconf->tx_mbufs[port].len = 0;
+}
+
+/* Send burst of outgoing packet, if timeout expires. */
+static inline void
+send_timeout_burst(struct lcore_queue_conf *qconf)
+{
+	uint64_t cur_tsc;
+	uint16_t portid;
+	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;
+
+	cur_tsc = rte_rdtsc();
+	if (likely (cur_tsc < qconf->tx_tsc + drain_tsc))
+		return;
+
+	for (portid = 0; portid < MAX_PORTS; portid++) {
+		if (qconf->tx_mbufs[portid].len != 0)
+			send_burst(qconf, portid);
+	}
+	qconf->tx_tsc = cur_tsc;
+}
+
 /**
  * This function handles adding (if needed) the custom trailer that stores the packet UID.
  * The UID is formed as:
@@ -215,83 +212,96 @@ swap_endian_long(uint64_t value) {
  */
 static inline void
 crinkle_forward(
-	struct rte_mbuf **bufs,
-	struct rte_mbuf **cbufs,
-	const uint16_t nb_pkts,
+	struct rte_mbuf *buf,
+	struct lcore_queue_conf *qconf,
 	const uint64_t systime_ns,
 	const uint64_t port)
 {
-	for (int i = 0; i < nb_pkts; ++i) {
+	#ifdef PROFILING
+	start = rte_get_tsc_cycles();
+	#endif
+	struct rte_mbuf *cbuf;
+	if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
+		return;
+	}
+	uint8_t *c;
+	
+	// candidate_trailer points to the lower 4 bytes, which are the ts check and MONPROT
+	uint32_t *candidate_trailer_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
+	uint32_t candidate_trailer = *candidate_trailer_ptr;
+	// The ts corresponding to ts check
+	uint32_t ts_lower = *(candidate_trailer_ptr-2);
+	#ifdef PROFILING
+	measures[TIME_OTHER] = rte_get_tsc_cycles() - start;
+
+	start = rte_get_tsc_cycles();
+	#endif
+	uint64_t uid_trailer[2];
+	uid_trailer[0] = systime_ns;
+	uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uid_trailer[0] << 16) & 0x00000000FFFF0000) + MONPROT;
+	uint16_t pkt_size = buf->data_len+16;
+	if (lendian) {
+		pkt_size = swap_endian_short(pkt_size);
+		candidate_trailer = swap_endian(candidate_trailer);
+		ts_lower = swap_endian(ts_lower);
+		uid_trailer[0] = swap_endian_long(uid_trailer[0]);
+		uid_trailer[1] = swap_endian_long(uid_trailer[1]);
+	}
+	#ifdef PROFILING
+	measures[TIME_BUILD_TRAILER] = rte_get_tsc_cycles() - start;
+	#endif
+
+	// Check for existing UUID trailer
+	if ((candidate_trailer & 0x0000FFFF) != MONPROT || (candidate_trailer >> 16) != (ts_lower & 0x0000FFFF)) {
 		#ifdef PROFILING
 		start = rte_get_tsc_cycles();
 		#endif
-		struct rte_mbuf *buf = bufs[i];
-		struct rte_mbuf *cbuf;
-		if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
-			continue;
-		}
-		uint8_t *c;
-		
-		// candidate_trailer points to the lower 4 bytes, which are the ts check and MONPROT
-		uint32_t *candidate_trailer_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
-		uint32_t candidate_trailer = *candidate_trailer_ptr;
-		// The ts corresponding to ts check
-		uint32_t ts_lower = *(candidate_trailer_ptr-2);
-		#ifdef PROFILING
-		measures[TIME_OTHER] = rte_get_tsc_cycles() - start;
-
-		start = rte_get_tsc_cycles();
-		#endif
-		uint64_t uid_trailer[2];
-		uid_trailer[0] = systime_ns + i;
-		uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uid_trailer[0] << 16) & 0x00000000FFFF0000) + MONPROT;
-		uint16_t pkt_size = buf->data_len+16;
-		if (lendian) {
-			pkt_size = swap_endian_short(pkt_size);
-			candidate_trailer = swap_endian(candidate_trailer);
-			ts_lower = swap_endian(ts_lower);
-			uid_trailer[0] = swap_endian_long(uid_trailer[0]);
-			uid_trailer[1] = swap_endian_long(uid_trailer[1]);
-		}
-		#ifdef PROFILING
-		measures[TIME_BUILD_TRAILER] = rte_get_tsc_cycles() - start;
-		#endif
-
-		// Check for existing UUID trailer
-		if ((candidate_trailer & 0x0000FFFF) != MONPROT || (candidate_trailer >> 16) != (ts_lower & 0x0000FFFF)) {
-			#ifdef PROFILING
-			start = rte_get_tsc_cycles();
-			#endif
-			uint8_t *trailer;
-			if (unlikely((trailer = (uint8_t *)rte_pktmbuf_append(buf, 16)) == NULL)) {
-				printf("Failed to append trailer to packet %d\n", i);
-				rte_pktmbuf_free(cbuf);
-				continue;
-			}
-			rte_mov16(trailer, (uint8_t *)uid_trailer);
-			#ifdef PROFILING
-			measures[TIME_ADD_TRAILER] = rte_get_tsc_cycles() - start;
-			#endif
-		}
-
-		#ifdef PROFILING
-		start = rte_get_tsc_cycles();
-		#endif
-		uint8_t *trailer = rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16);
-		if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
-			printf("Failed to append clone packet %d\n", i);
+		uint8_t *trailer;
+		if (unlikely((trailer = (uint8_t *)rte_pktmbuf_append(buf, 16)) == NULL)) {
+			printf("Failed to append trailer to packet");
 			rte_pktmbuf_free(cbuf);
-			continue;
+			return;
 		}
-		rte_mov64(c, ana_headers);
-		rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
-		rte_mov16(c+56, (uint8_t *)uid_trailer);
-		rte_mov16(c+72, trailer);
-		cbufs[i] = cbuf;
+		rte_mov16(trailer, (uint8_t *)uid_trailer);
 		#ifdef PROFILING
-		measures[TIME_ADD_HEADERS] = rte_get_tsc_cycles() - start;
+		measures[TIME_ADD_TRAILER] = rte_get_tsc_cycles() - start;
 		#endif
 	}
+
+	#ifdef PROFILING
+	start = rte_get_tsc_cycles();
+	#endif
+	uint8_t *trailer = rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16);
+	if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
+		printf("Failed to append clone packet");
+		rte_pktmbuf_free(cbuf);
+		return;
+	}
+	rte_mov64(c, ana_headers);
+	rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
+	rte_mov16(c+56, (uint8_t *)uid_trailer);
+	rte_mov16(c+72, trailer);
+	#ifdef PROFILING
+	measures[TIME_ADD_HEADERS] = rte_get_tsc_cycles() - start;
+	#endif
+	uint16_t outport;
+	if (port == 1) {
+		outport = vport_to_devport[2];
+	} else {
+		outport = vport_to_devport[1];
+	}
+
+	uint16_t len = qconf->tx_mbufs[outport].len;
+	qconf->tx_mbufs[outport].m_table[len] = cbuf;
+	qconf->tx_mbufs[outport].len = ++len;
+	if (unlikely(BURST_SIZE == len))
+		send_burst(qconf, outport);
+
+	uint16_t ana_len = qconf->tx_mbufs[vport_to_devport[0]].len;
+	qconf->tx_mbufs[vport_to_devport[0]].m_table[ana_len] = cbuf;
+	qconf->tx_mbufs[vport_to_devport[0]].len = ++ana_len;
+	if (unlikely(BURST_SIZE == ana_len))
+		send_burst(qconf, vport_to_devport[0]);
 }
 
 /*
@@ -300,25 +310,23 @@ crinkle_forward(
  */
 
  /* Basic forwarding application lcore. 8< */
-static __rte_noreturn void
-lcore_main(uint16_t vport_to_devport[], uint16_t devport_to_vport[])
+static int
+lcore_main(__rte_unused void *dummy)
 {
-	uint16_t port;
+	struct rte_mbuf *bufs[BURST_SIZE];
+	unsigned lcore_id;
+	int i, j, nb_rx;
+	uint16_t portid;
+	struct lcore_queue_conf *qconf;
 
-	/*
-	 * Check that the port is on the same NUMA node as the polling thread
-	 * for best performance.
-	 */
-	RTE_ETH_FOREACH_DEV(port)
-		if (rte_eth_dev_socket_id(port) >= 0 &&
-				rte_eth_dev_socket_id(port) !=
-						(int)rte_socket_id())
-			printf("WARNING, port %u is on remote NUMA node to "
-					"polling thread.\n\tPerformance will "
-					"not be optimal.\n", port);
+	lcore_id = rte_lcore_id();
+	qconf = &lcore_queue_conf[lcore_id];
 
-	printf("\nCore %u forwarding packets. [Ctrl+C to quit]\n",
-			rte_lcore_id());
+
+	if (qconf->n_rx_queue == 0) {
+		printf("lcore %u has nothing to do\n",lcore_id);
+		return 0;
+	}
 
 	/* Main work of application loop. 8< */
 	struct timespec systime;
@@ -331,29 +339,19 @@ lcore_main(uint16_t vport_to_devport[], uint16_t devport_to_vport[])
         lendian = true;
     }
 
-	for (;;) {
-		/*
-		 * Receive packets on a port and forward them on the paired
-		 * port. The mapping is 0 -> 1, 1 -> 0, 2 -> 3, 3 -> 2, etc.
-		 */
-		RTE_ETH_FOREACH_DEV(port) {
+	for (i = 0; i < qconf->n_rx_queue; ++i) {
+		portid = qconf->rx_queue_list[i];
+		printf(" -- lcoreid=%u portid=%d\n", lcore_id, portid);
+	}
 
-			// port 0 is the analyzer
-			if (port == vport_to_devport[0]) continue;
-
-			/* Get burst of RX packets, from first port of pair. */
-			struct rte_mbuf *bufs[BURST_SIZE];
-			const uint16_t nb_rx = rte_eth_rx_burst(port, 0,
-					bufs, BURST_SIZE);
-
-			if (unlikely(nb_rx == 0))
-				continue;
-
-			// struct rte_mbuf *cbufs[BURST_SIZE];
-			// int retval = rte_pktmbuf_alloc_bulk(mbuf_pool, cbufs, nb_rx);
-			// if (retval != 0) {
-			// 	printf("Failed to allocate clone bufs: Code %i\n", retval);
-			// }
+	if (portid == vport_to_devport[0]) {
+		while(1) {
+			/* Send out packets from TX queues */
+			send_timeout_burst(qconf);
+		}
+	}
+	else {
+		while (1) {
 			#ifdef PROFILING
 			start = rte_get_tsc_cycles();
 			#endif
@@ -362,67 +360,54 @@ lcore_main(uint16_t vport_to_devport[], uint16_t devport_to_vport[])
 			#ifdef PROFILING
 			measures[TIME_GET_TIME] = rte_get_tsc_cycles() - start;
 			#endif
-			struct rte_mbuf *cbufs[BURST_SIZE];
-			crinkle_forward(bufs, cbufs, nb_rx, systime_ns, devport_to_vport[port]);
+			for (i = 0; i < qconf->n_rx_queue; ++i) {
+				portid = qconf->rx_queue_list[i];
+				nb_rx = rte_eth_rx_burst(portid, 0, bufs, BURST_SIZE);
 
-
-			#ifdef PROFILING
-			start = rte_get_tsc_cycles();
-			#endif
-			/* Send burst of TX packets, to second port of pair. */
-			uint16_t nb_tx = 0;
-			if (port == vport_to_devport[1]) {
-				nb_tx = rte_eth_tx_burst(vport_to_devport[2], 0,
-						bufs, nb_rx);
-			}
-			else {
-				nb_tx = rte_eth_tx_burst(vport_to_devport[1], 0,
-						bufs, nb_rx);
-			}
-
-			/* Free any unsent packets. */
-			if (unlikely(nb_tx < nb_rx)) {
-				uint16_t buf;
-				for (buf = nb_tx; buf < nb_rx; buf++)
-					rte_pktmbuf_free(bufs[buf]);
-			}
-			
-			nb_tx = rte_eth_tx_burst(vport_to_devport[0], 0, cbufs, nb_rx);
-			/* Free any unsent packets. */
-			if (unlikely(nb_tx < nb_rx)) {
-				uint16_t buf;
-				for (buf = nb_tx; buf < nb_rx; buf++)
-					rte_pktmbuf_free(cbufs[buf]);
-			}
-			#ifdef PROFILING
-			measures[TIME_TX_PKTS] = rte_get_tsc_cycles() - start;
-			#endif
-
-			// timing
-			#ifdef PROFILING
-			uint64_t delta1 = 0;
-			uint64_t delta2 = 0;
-			if (nb_tx == 0) {
-				continue;
-			}
-			++pop_size;
-			for (int i = 0; i < 6; ++i) {
-				delta1 = measures[i] - measures[i+6];
-				measures[i+6] = measures[i+6] + (delta1 / pop_size);
-				delta2 = measures[i] - measures[i+6];
-				measures[i+12] = RTE_MAX(measures[i+12], measures[i]);
-				measures[i+18] = measures[i+18] + (delta1 * delta2);
-			}
-			if (pop_size % 100 == 0) {
-				printf("Pop\t%lu\n", pop_size);
-				for (int i = 0; i < 6; ++i) {
-					printf("Time\t%d\t%lu\t%lu\t%lu\t%lu\n", i,
-						   measures[i], measures[i+6], measures[i+12], measures[i+18]);
+				/* Prefetch first packets */
+				for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; j++) {
+					rte_prefetch0(rte_pktmbuf_mtod(bufs[j], void *));
 				}
-				fflush(stdout);
+
+				/* Prefetch and forward already prefetched packets */
+				for (j = 0; j < (nb_rx - PREFETCH_OFFSET); j++) {
+					rte_prefetch0(rte_pktmbuf_mtod(bufs[j + PREFETCH_OFFSET], void *));
+					crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid]);
+				}
+
+				/* Forward remaining prefetched packets */
+				for (; j < nb_rx; j++) {
+					crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid]);
+				}
 			}
-			#endif
+			/* Send out packets from TX queues */
+			send_timeout_burst(qconf);
+	}
+
+		// timing
+		#ifdef PROFILING
+		uint64_t delta1 = 0;
+		uint64_t delta2 = 0;
+		if (nb_tx == 0) {
+			continue;
 		}
+		++pop_size;
+		for (int i = 0; i < 6; ++i) {
+			delta1 = measures[i] - measures[i+6];
+			measures[i+6] = measures[i+6] + (delta1 / pop_size);
+			delta2 = measures[i] - measures[i+6];
+			measures[i+12] = RTE_MAX(measures[i+12], measures[i]);
+			measures[i+18] = measures[i+18] + (delta1 * delta2);
+		}
+		if (pop_size % 100 == 0) {
+			printf("Pop\t%lu\n", pop_size);
+			for (int i = 0; i < 6; ++i) {
+				printf("Time\t%d\t%lu\t%lu\t%lu\t%lu\n", i,
+						measures[i], measures[i+6], measures[i+12], measures[i+18]);
+			}
+			fflush(stdout);
+		}
+		#endif
 	}
 	/* >8 End of loop. */
 }
@@ -437,9 +422,6 @@ lcore_main(uint16_t vport_to_devport[], uint16_t devport_to_vport[])
 int
 main(int argc, char *argv[])
 {
-	unsigned nb_ports;
-	uint16_t portid;
-
 	/* Initializion the Environment Abstraction Layer (EAL). 8< */
 	int ret = rte_eal_init(argc, argv);
 	if (ret < 0)
@@ -450,11 +432,9 @@ main(int argc, char *argv[])
 	argv += ret;
 
 	/* Check that there is an even number of ports to send/receive on. */
-	nb_ports = rte_eth_dev_count_avail();
+	unsigned nb_ports = rte_eth_dev_count_avail();
 	
 	int arg;
-	uint16_t vport_to_devport[nb_ports];
-	uint16_t devport_to_vport[nb_ports];
 	bool set_mon_id = false;
 	bool set_macs = false;
 	bool set_ips = false;
@@ -566,21 +546,137 @@ main(int argc, char *argv[])
 	if (clone_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init clone mbuf pool\n");
 
-	/* Initializing all ports. 8< */
-	RTE_ETH_FOREACH_DEV(portid)
-		if (port_init(portid, packet_pool) != 0)
-			rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16 "\n",
-					portid);
-	/* >8 End of initializing all ports. */
+	uint32_t nb_lcores = rte_lcore_count();
+	uint16_t portid;
+	uint32_t n_tx_queue;
+	unsigned lcore_id = 0, rx_lcore_id = 0;
+	struct lcore_queue_conf *qconf;
+	struct rte_eth_dev_info dev_info;
+	struct rte_eth_txconf *txconf;
+	uint16_t queueid;
 
-	if (rte_lcore_count() > 1)
-		printf("\nWARNING: Too many lcores enabled. Only 1 used.\n");
+	/* Initializing all ports. 8< */
+	RTE_ETH_FOREACH_DEV(portid) {
+		struct rte_eth_rxconf rxq_conf;
+		struct rte_eth_conf local_port_conf = port_conf;
+
+		qconf = &lcore_queue_conf[rx_lcore_id];
+
+		/* limit the frame size to the maximum supported by NIC */
+		ret = rte_eth_dev_info_get(portid, &dev_info);
+		if (ret != 0)
+			rte_exit(EXIT_FAILURE,
+				"Error during getting device (port %u) info: %s\n",
+				portid, strerror(-ret));
+
+		local_port_conf.rxmode.mtu = RTE_MIN(
+		    dev_info.max_mtu,
+		    local_port_conf.rxmode.mtu);
+
+		/* get the lcore_id for this port */
+		while (rte_lcore_is_enabled(rx_lcore_id) == 0 ||
+		       qconf->n_rx_queue == (unsigned)rx_queue_per_lcore) {
+
+			rx_lcore_id ++;
+			qconf = &lcore_queue_conf[rx_lcore_id];
+
+			if (rx_lcore_id >= RTE_MAX_LCORE)
+				rte_exit(EXIT_FAILURE, "Not enough cores\n");
+		}
+		qconf->rx_queue_list[qconf->n_rx_queue] = portid;
+		qconf->n_rx_queue++;
+
+		/* init port */
+		printf("Initializing port %d on lcore %u... ", portid,
+		       rx_lcore_id);
+		fflush(stdout);
+
+		n_tx_queue = nb_lcores;
+		if (n_tx_queue > MAX_TX_QUEUE_PER_PORT)
+			n_tx_queue = MAX_TX_QUEUE_PER_PORT;
+
+		ret = rte_eth_dev_configure(portid, 1, (uint16_t)n_tx_queue,
+					    &local_port_conf);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%d\n",
+				  ret, portid);
+
+		ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd,
+						       &nb_txd);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE,
+				 "Cannot adjust number of descriptors: err=%d, port=%d\n",
+				 ret, portid);
+
+		ret = rte_eth_macaddr_get(portid, &ports_eth_addr[portid]);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE,
+				 "Cannot get MAC address: err=%d, port=%d\n",
+				 ret, portid);
+
+		print_ethaddr(" Address:", &ports_eth_addr[portid]);
+		printf(", ");
+
+		/* init one RX queue */
+		queueid = 0;
+		printf("rxq=%hu ", queueid);
+		fflush(stdout);
+		rxq_conf = dev_info.default_rxconf;
+		rxq_conf.offloads = local_port_conf.rxmode.offloads;
+		ret = rte_eth_rx_queue_setup(portid, queueid, nb_rxd,
+					     rte_eth_dev_socket_id(portid),
+					     &rxq_conf,
+					     packet_pool);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%d, port=%d\n",
+				  ret, portid);
+
+		/* init one TX queue per couple (lcore,port) */
+		queueid = 0;
+
+		RTE_LCORE_FOREACH(lcore_id) {
+			if (rte_lcore_is_enabled(lcore_id) == 0)
+				continue;
+			printf("txq=%u,%hu ", lcore_id, queueid);
+			fflush(stdout);
+
+			txconf = &dev_info.default_txconf;
+			ret = rte_eth_tx_queue_setup(portid, queueid, nb_txd,
+						     rte_lcore_to_socket_id(lcore_id), txconf);
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%d, "
+					  "port=%d\n", ret, portid);
+
+			qconf = &lcore_queue_conf[lcore_id];
+			qconf->tx_queue_id[portid] = queueid;
+			queueid++;
+		}
+		ret = rte_eth_promiscuous_enable(portid);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE,
+				"rte_eth_promiscuous_enable: err=%d, port=%d\n",
+				ret, portid);
+		/* Start device */
+		ret = rte_eth_dev_start(portid);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "rte_eth_dev_start: err=%d, port=%d\n",
+				  ret, portid);
+
+		printf("done:\n");
+	}
+	/* >8 End of initializing all ports. */
 	
 	tsc_hz = rte_get_tsc_hz();
 	printf("Running at %lu hz\n", tsc_hz);
 
+	rte_eal_mp_remote_launch(lcore_main, NULL, CALL_MAIN);
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
+		if (rte_eal_wait_lcore(lcore_id) < 0)
+			return -1;
+	}
+
 	/* Call lcore_main on the main core only. Called on single lcore. 8< */
-	lcore_main(vport_to_devport, devport_to_vport);
+	//lcore_main(vport_to_devport, devport_to_vport);
 	/* >8 End of called on single lcore. */
 
 	/* clean up the EAL */
