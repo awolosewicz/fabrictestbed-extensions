@@ -444,7 +444,7 @@ class CrinkleSlice(Slice):
         slice.analyzer_name = slice.analyzer.get_name()
         slice.analyzer_iface = slice.analyzer.get_interface(network_name=slice.analyzer_cnet.get_name())
 
-        for node in slice.get_nodes():
+        for node in slice.get_all_nodes():
             node_name: str = node.get_name()
             if node_name.startswith(f"{name_prefix}_monitor_"):
                 monitor = slice.get_monitor(name=node_name)
@@ -880,7 +880,7 @@ class CrinkleSlice(Slice):
             fabresources = fablib.get_resources()
             validated_nodes: dict[str, bool] = {}
 
-            for node in self.get_nodes():
+            for node in self.get_all_nodes():
                 host_name = node.get_host()
                 if host_name is None:
                     validated_nodes[node.get_name()] = False
@@ -943,7 +943,7 @@ class CrinkleSlice(Slice):
                             break
                     if not validated_nodes[monitor_name]:
                         raise Exception(f"Could not place monitor for network {monitor.data.net_name} due to a lack of free workers. Please try another site.")
-            for node in self.get_nodes():
+            for node in self.get_all_nodes():
                 node_name = node.get_name()
                 if validated_nodes[node_name]:
                     continue
@@ -1087,16 +1087,16 @@ class CrinkleSlice(Slice):
             logging.info(f"Crinkle post_boot_config done")
             print("Crinkle post_boot_config done")
 
-    def get_non_crinkle_nodes(self, refresh: bool = False) -> list[Node]:
+    def get_nodes(self, refresh: bool = False) -> list[Node]:
         """
-        Gets a list of all nodes in this slice.
+        Gets a list of all non-Crinkle nodes in this slice.
 
         :return: a list of fablib nodes
         :rtype: List[Node]
         """
         if not self.nodes or not len(self.nodes):
             refresh = True
-        nodes = self.get_nodes(refresh=refresh)
+        nodes = super().get_nodes(refresh=refresh)
         crinkle_nodes = [mon_name for mon_name in self.monitors.keys()]
         crinkle_nodes.append(self.analyzer_name)
         i = 0
@@ -1108,6 +1108,16 @@ class CrinkleSlice(Slice):
             else:
                 i += 1
         return nodes
+    
+    def get_all_nodes(self, refresh: bool = False):
+        """
+        Gets a list of all nodes in this slice.
+
+        :return: a list of fablib nodes
+        :rtype: List[Node]
+        """
+        return super().get_nodes(refresh=refresh)
+
     
     @staticmethod
     def mac_to_int(mac: str):
