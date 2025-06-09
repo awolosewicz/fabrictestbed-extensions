@@ -16,9 +16,9 @@
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
 
-#define NUM_MBUFS 16383
-#define MBUF_CACHE_SIZE 127
-#define BURST_SIZE 32
+#define NUM_MBUFS 8192
+#define MBUF_CACHE_SIZE 64
+#define BURST_SIZE 64
 #define BURST_TX_DRAIN_US 100 /* TX drain every ~100us */
 /* Configure how many packets ahead to prefetch, when reading packets */
 #define PREFETCH_OFFSET	3
@@ -116,6 +116,13 @@ struct __rte_cache_aligned lcore_queue_conf {
 };
 static struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
+struct __rte_cache_aligned pkt_metadata {
+	uint64_t systime_ns;
+	uint64_t trailer;
+	//uint32_t candidate_trailer;
+	//uint32_t ts_lower;
+};
+
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
 		.mtu = MAX_RX_MTU,
@@ -184,19 +191,19 @@ send_burst(struct lcore_queue_conf *qconf, uint16_t port)
 static inline void
 send_timeout_burst(struct lcore_queue_conf *qconf)
 {
-	uint64_t cur_tsc;
+	//uint64_t cur_tsc;
 	uint16_t portid;
-	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;
+	//const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;
 
-	cur_tsc = rte_rdtsc();
-	if (likely (cur_tsc < qconf->tx_tsc + drain_tsc))
-		return;
+	//cur_tsc = rte_rdtsc();
+	//if (likely (cur_tsc < qconf->tx_tsc + drain_tsc))
+	//	return;
 
 	for (portid = 0; portid < MAX_PORTS; portid++) {
 		if (qconf->tx_mbufs[portid].len != 0)
 			send_burst(qconf, portid);
 	}
-	qconf->tx_tsc = cur_tsc;
+	//qconf->tx_tsc = cur_tsc;
 }
 
 /**
@@ -217,61 +224,36 @@ crinkle_forward(
 	const uint64_t systime_ns,
 	const uint64_t port)
 {
-	#ifdef PROFILING
-	start = rte_get_tsc_cycles();
-	#endif
+	uint16_t len;
+	uint16_t outport;
+	struct pkt_metadata uid_trailer;
+	const uint32_t *candidate_trailer_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
+	uint32_t candidate_trailer = *candidate_trailer_ptr;
+	uint32_t ts_lower = *(candidate_trailer_ptr-2);
+	uint8_t *trailer = rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16);
+	uint8_t *c;
 	struct rte_mbuf *cbuf;
 	if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
 		return;
 	}
-	uint8_t *c;
-	
-	// candidate_trailer points to the lower 4 bytes, which are the ts check and MONPROT
-	uint32_t *candidate_trailer_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
-	uint32_t candidate_trailer = *candidate_trailer_ptr;
-	// The ts corresponding to ts check
-	uint32_t ts_lower = *(candidate_trailer_ptr-2);
-	#ifdef PROFILING
-	measures[TIME_OTHER] = rte_get_tsc_cycles() - start;
 
-	start = rte_get_tsc_cycles();
-	#endif
-	uint64_t uid_trailer[2];
-	uid_trailer[0] = systime_ns;
-	uid_trailer[1] = (mon_id << 48) + (port << 32) + ((uid_trailer[0] << 16) & 0x00000000FFFF0000) + MONPROT;
-	uint16_t pkt_size = buf->data_len+16;
-	if (lendian) {
-		pkt_size = swap_endian_short(pkt_size);
-		candidate_trailer = swap_endian(candidate_trailer);
-		ts_lower = swap_endian(ts_lower);
-		uid_trailer[0] = swap_endian_long(uid_trailer[0]);
-		uid_trailer[1] = swap_endian_long(uid_trailer[1]);
-	}
-	#ifdef PROFILING
-	measures[TIME_BUILD_TRAILER] = rte_get_tsc_cycles() - start;
-	#endif
+	// Build trailer
+	uid_trailer.systime_ns = rte_cpu_to_be_64(systime_ns);
+	uid_trailer.trailer = rte_cpu_to_be_64((mon_id << 48) + (port << 32) + ((uid_trailer.systime_ns << 16) & 0x00000000FFFF0000) + MONPROT);
 
 	// Check for existing UUID trailer
 	if ((candidate_trailer & 0x0000FFFF) != MONPROT || (candidate_trailer >> 16) != (ts_lower & 0x0000FFFF)) {
-		#ifdef PROFILING
-		start = rte_get_tsc_cycles();
-		#endif
-		uint8_t *trailer;
 		if (unlikely((trailer = (uint8_t *)rte_pktmbuf_append(buf, 16)) == NULL)) {
 			printf("Failed to append trailer to packet");
 			rte_pktmbuf_free(cbuf);
 			return;
 		}
-		rte_mov16(trailer, (uint8_t *)uid_trailer);
-		#ifdef PROFILING
-		measures[TIME_ADD_TRAILER] = rte_get_tsc_cycles() - start;
-		#endif
+		rte_mov16(trailer, (uint8_t *)(&uid_trailer));
 	}
 
-	#ifdef PROFILING
-	start = rte_get_tsc_cycles();
-	#endif
-	uint8_t *trailer = rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16);
+
+
+	uint16_t pkt_size = rte_cpu_to_be_64(buf->data_len);
 	if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
 		printf("Failed to append clone packet");
 		rte_pktmbuf_free(cbuf);
@@ -279,29 +261,30 @@ crinkle_forward(
 	}
 	rte_mov64(c, ana_headers);
 	rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
-	rte_mov16(c+56, (uint8_t *)uid_trailer);
+	rte_mov16(c+56, (uint8_t *)(&uid_trailer));
 	rte_mov16(c+72, trailer);
-	#ifdef PROFILING
-	measures[TIME_ADD_HEADERS] = rte_get_tsc_cycles() - start;
-	#endif
-	uint16_t outport;
+	
+
+	//uint64_t end5 = rte_get_tsc_cycles();
+
 	if (port == 1) {
 		outport = vport_to_devport[2];
 	} else {
 		outport = vport_to_devport[1];
 	}
-
-	uint16_t len = qconf->tx_mbufs[outport].len;
-	qconf->tx_mbufs[outport].m_table[len] = cbuf;
+	
+	len = qconf->tx_mbufs[outport].len;
+	qconf->tx_mbufs[outport].m_table[len] = buf;
 	qconf->tx_mbufs[outport].len = ++len;
 	if (unlikely(BURST_SIZE == len))
 		send_burst(qconf, outport);
 
-	uint16_t ana_len = qconf->tx_mbufs[vport_to_devport[0]].len;
-	qconf->tx_mbufs[vport_to_devport[0]].m_table[ana_len] = cbuf;
-	qconf->tx_mbufs[vport_to_devport[0]].len = ++ana_len;
-	if (unlikely(BURST_SIZE == ana_len))
-		send_burst(qconf, vport_to_devport[0]);
+	
+	len = qconf->tx_mbufs[vport_to_devport[0]].len;
+	qconf->tx_mbufs[vport_to_devport[0]].m_table[len] = cbuf;
+	qconf->tx_mbufs[vport_to_devport[0]].len = ++len;
+	if (unlikely(BURST_SIZE == len))
+	 	send_burst(qconf, vport_to_devport[0]);
 }
 
 /*
@@ -331,6 +314,7 @@ lcore_main(__rte_unused void *dummy)
 	/* Main work of application loop. 8< */
 	struct timespec systime;
 	uint64_t systime_ns;
+	uint64_t last_burst_ns = 0;
 
 	// Tests for little endian memory, since we must write to packet
 	// buffers values in big-endian format
@@ -345,31 +329,21 @@ lcore_main(__rte_unused void *dummy)
 	}
 
 	if (portid == vport_to_devport[0]) {
-		while(1) {
-			/* Send out packets from TX queues */
-			send_timeout_burst(qconf);
-		}
+		return 0;
 	}
 	else {
-		while (1) {
-			#ifdef PROFILING
-			start = rte_get_tsc_cycles();
-			#endif
+		while (1) {	
 			clock_gettime(CLOCK_REALTIME, &systime);
 			systime_ns = timespec64_to_ns(&systime);
-			#ifdef PROFILING
-			measures[TIME_GET_TIME] = rte_get_tsc_cycles() - start;
-			#endif
 			for (i = 0; i < qconf->n_rx_queue; ++i) {
 				portid = qconf->rx_queue_list[i];
 				nb_rx = rte_eth_rx_burst(portid, 0, bufs, BURST_SIZE);
 
-				/* Prefetch first packets */
+				
 				for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; j++) {
 					rte_prefetch0(rte_pktmbuf_mtod(bufs[j], void *));
 				}
 
-				/* Prefetch and forward already prefetched packets */
 				for (j = 0; j < (nb_rx - PREFETCH_OFFSET); j++) {
 					rte_prefetch0(rte_pktmbuf_mtod(bufs[j + PREFETCH_OFFSET], void *));
 					crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid]);
@@ -381,33 +355,11 @@ lcore_main(__rte_unused void *dummy)
 				}
 			}
 			/* Send out packets from TX queues */
-			send_timeout_burst(qconf);
-	}
-
-		// timing
-		#ifdef PROFILING
-		uint64_t delta1 = 0;
-		uint64_t delta2 = 0;
-		if (nb_tx == 0) {
-			continue;
-		}
-		++pop_size;
-		for (int i = 0; i < 6; ++i) {
-			delta1 = measures[i] - measures[i+6];
-			measures[i+6] = measures[i+6] + (delta1 / pop_size);
-			delta2 = measures[i] - measures[i+6];
-			measures[i+12] = RTE_MAX(measures[i+12], measures[i]);
-			measures[i+18] = measures[i+18] + (delta1 * delta2);
-		}
-		if (pop_size % 100 == 0) {
-			printf("Pop\t%lu\n", pop_size);
-			for (int i = 0; i < 6; ++i) {
-				printf("Time\t%d\t%lu\t%lu\t%lu\t%lu\n", i,
-						measures[i], measures[i+6], measures[i+12], measures[i+18]);
+			if (unlikely(systime_ns - last_burst_ns >= 100*1000)) {
+				send_timeout_burst(qconf);
+				last_burst_ns = systime_ns;
 			}
-			fflush(stdout);
 		}
-		#endif
 	}
 	/* >8 End of loop. */
 }
@@ -503,7 +455,7 @@ main(int argc, char *argv[])
 				printf("  -v    Print version\n");
 				exit(EXIT_SUCCESS);
 			case 'v':
-				printf("Crease Monitor v0.3\n");
+				printf("Crease Monitor v0.3.1\n");
 				exit(EXIT_SUCCESS);
 			case '?':
 				switch (optopt) {
@@ -641,6 +593,7 @@ main(int argc, char *argv[])
 			fflush(stdout);
 
 			txconf = &dev_info.default_txconf;
+			printf("txconf offloads: 0x%" PRIx64 "\n", txconf->offloads);
 			ret = rte_eth_tx_queue_setup(portid, queueid, nb_txd,
 						     rte_lcore_to_socket_id(lcore_id), txconf);
 			if (ret < 0)
