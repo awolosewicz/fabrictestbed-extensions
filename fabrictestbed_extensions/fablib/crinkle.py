@@ -322,6 +322,7 @@ class CrinkleSlice(Slice):
         self.prefix = name_prefix
         self.monitor_count = 0
         self.monitor_string = None
+        self.all_interfaces = {}
         self.probe_id = 0
         self.do_allocate_hosts = True
         self.did_post_boot = False
@@ -967,6 +968,9 @@ class CrinkleSlice(Slice):
             self.do_allocate_hosts = False
             logging.info(f"Hosts allocated")
             for host_name in allocated:
+                site_name = host_name.split("-")[0].upper()
+                site = sitenames_to_sites.setdefault(site_name, fabresources.get_site(site_name))
+                hosts = sitenames_to_hosts.setdefault(site_name, site.get_hosts())
                 host = hosts[host_name]
                 allocated_comps = allocated[host_name]
                 logging.info(f"{host_name}: CPU {allocated_comps['core']}/{host.get_core_available()} "
@@ -1118,6 +1122,76 @@ class CrinkleSlice(Slice):
         """
         return super().get_nodes(refresh=refresh)
 
+    def get_interface(self, name: str = None, refresh: bool = False) -> Interface:
+        """
+        Gets a particular interface from this slice.
+
+        :param name: the name of the interface to search for
+        :type name: str
+
+        :param refresh: Refresh the interface object with latest Fim info
+        :type refresh: bool
+
+        :raises Exception: if no interfaces with name are found
+        :return: an interface on this slice
+        :rtype: Interface
+        """
+        ret_val = self.get_all_interfaces(refresh=refresh, output="dict").get(name)
+        if not ret_val:
+            raise Exception("Interface not found: {}".format(name))
+        return ret_val
+    
+    def get_interfaces(
+        self, include_subs: bool = True, refresh: bool = False, output: str = "list"):
+        """
+        Gets all non-Crinkle interfaces in this slice.
+
+        :param include_subs: Flag indicating if sub interfaces should be included
+        :type include_subs: bool
+
+        :param refresh: Refresh the interface object with latest Fim info
+        :type refresh: bool
+
+        :param output: Specify how the return type is expected; Possible values: list or dict
+        :type output: str
+
+        :return: a list of interfaces on this slice
+        :rtype: Union[dict[str, Interface], list[Interface]]
+        """
+        return super().get_interfaces(include_subs=include_subs, refresh=refresh, output=output)
+    
+    def get_all_interfaces(
+        self, include_subs: bool = True, refresh: bool = False, output: str = "list"):
+        """
+        Gets all interfaces in this slice.
+
+        :param include_subs: Flag indicating if sub interfaces should be included
+        :type include_subs: bool
+
+        :param refresh: Refresh the interface object with latest Fim info
+        :type refresh: bool
+
+        :param output: Specify how the return type is expected; Possible values: list or dict
+        :type output: str
+
+        :return: a list of interfaces on this slice
+        :rtype: Union[dict[str, Interface], list[Interface]]
+        """
+        if len(self.all_interfaces) == 0 or refresh:
+            for node in self.get_all_nodes(refresh=refresh):
+                logging.debug(f"Getting interfaces for node {node.get_name()}")
+                # get_nodes will already refresh interfaces if needed
+                n_ifaces = node.get_interfaces(include_subs=include_subs, output="dict")
+                self.all_interfaces.update(n_ifaces)
+            for fac in self.get_facilities(refresh=refresh):
+                logging.debug(f"Getting interfaces for facility {fac.get_name()}")
+                fac_ifaces = fac.get_interfaces(refresh=refresh, output="dict")
+                self.all_interfaces.update(fac_ifaces)
+
+        if output == "dict":
+            return self.all_interfaces
+        else:
+            return list(self.all_interfaces.values())
     
     @staticmethod
     def mac_to_int(mac: str):
