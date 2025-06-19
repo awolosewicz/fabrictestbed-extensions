@@ -325,7 +325,8 @@ class CrinkleSlice(Slice):
         self.all_interfaces = {}
         self.probe_id = 0
         self.do_allocate_hosts = True
-        self.did_post_boot = False
+        self.do_post_boot = True
+        self.do_ptp_setup = True
 
     @staticmethod
     def new_slice(
@@ -366,7 +367,9 @@ class CrinkleSlice(Slice):
             self.analyzer_name = data["analyzer_name"]
             self.prefix = data["prefix"]
             self.monitor_string = data["monitor_string"]
-            self.did_post_boot = data["did_post_boot"]
+            self.do_allocate_hosts = data["do_allocate_hosts"]
+            self.do_post_boot = data["do_post_boot"]
+            self.do_ptp_setup = data["do_ptp_setup"]
             logging.info(f"Retrieved crinkle slice config as:\n{self.analyzer_name}\n{self.prefix}\n{self.monitor_string}")
         else:
             logging.info(f"Did not retrieve stored crinkle slice config")
@@ -381,7 +384,9 @@ class CrinkleSlice(Slice):
             "analyzer_name": self.analyzer_name,
             "prefix": self.prefix,
             "monitor_string": self.monitor_string,
-            "did_post_boot": self.did_post_boot
+            "do_allocate_hosts": self.do_allocate_hosts,
+            "do_post_boot": self.do_post_boot,
+            "do_ptp_setup": self.do_ptp_setup
         }
         logging.info(f"Writing crinkle slice config to user data: {data_dict}")
         user_data["crinkle_slice_config"] = data_dict
@@ -804,6 +809,110 @@ class CrinkleSlice(Slice):
         user_data["crinkle_net_name"] = name
         net.set_user_data(user_data=user_data)
 
+    def allocate_hosts(self):
+        allocated = {}
+        logging.info("Allocating Monitors and their connected Nodes to different worker hosts")
+        sitenames_to_sites: dict[str, Site] = {}
+        sitenames_to_hosts: dict[str, dict[str, Host]] = {}
+        fablib = self.get_fablib_manager()
+        fabresources = fablib.get_resources()
+        validated_nodes: dict[str, bool] = {}
+
+        for node in self.get_all_nodes():
+            host_name = node.get_host()
+            if host_name is None:
+                validated_nodes[node.get_name()] = False
+                continue
+            allocated_comps = allocated.setdefault(host_name, {})
+            site_name = node.get_site()
+            site = sitenames_to_sites.setdefault(site_name, fabresources.get_site(site_name))
+            hosts = sitenames_to_hosts.setdefault(site_name, site.get_hosts())
+            host = hosts[host_name]
+            if fablib._FablibManager__can_allocate_node_in_host(
+                host=host, node=node, allocated=allocated_comps, site=site)[0]:
+                validated_nodes[node.get_name()] = True
+            else:
+                raise Exception(f"Host {host_name} does not have the free resources to reserve Node {node.get_name()}")
+
+        for _, monitor in self.monitors.items():
+            logging.info(f"Allocating Monitor for network {monitor.data.net_name}")
+            if monitor.data.net_type == "L2Bridge":
+                endpoint1 = self.get_node(name=monitor.creation_data[0][0])
+                endpoint2 = self.get_node(name=monitor.creation_data[1][0])
+                endpoints = [endpoint1, endpoint2]
+                site_name = endpoint1.get_site()
+                site = sitenames_to_sites.setdefault(site_name, fabresources.get_site(site_name))
+                hosts = sitenames_to_hosts.setdefault(site_name, site.get_hosts())
+                hostlist = list(hosts.items())
+                hostlist = sorted(hostlist)
+                endhosts = {}
+                for endpoint in endpoints:
+                    endpoint_name = endpoint.get_name()
+                    if validated_nodes[endpoint_name]:
+                        logging.info(f"Node {endpoint_name} already allocated to {endpoint.get_host()}")
+                        endhosts.setdefault(endpoint.get_host(), True)
+                        continue
+                    # TODO: instead, traverse hostlist in reverse
+                    for host_name, host in hostlist[1:]:
+                        allocated_comps = allocated.setdefault(host_name, {})
+                        if fablib._FablibManager__can_allocate_node_in_host(
+                            host=host, node=endpoint, allocated=allocated_comps, site=site)[0]:
+                            endpoint.set_host(host_name=host_name)
+                            endhosts.setdefault(host_name, True)
+                            validated_nodes[endpoint_name] = True
+                            logging.info(f'Node {endpoint_name} assigned to {host_name}')
+                            break
+                    if not validated_nodes[endpoint_name]:
+                        raise Exception(f"Could not place node {endpoint_name} due to a lack of free workers. Please try another site.")
+                monitor_name = monitor.get_name()
+                if validated_nodes.get(monitor_name, False):
+                    logging.info(f"Monitor {monitor_name} already allocated to {monitor.get_host()}")
+                    continue
+                for host_name, host in hostlist:
+                    if host_name in endhosts:
+                        continue
+                    allocated_comps = allocated.setdefault(host_name, {})
+                    if fablib._FablibManager__can_allocate_node_in_host(
+                        host=host, node=monitor, allocated=allocated_comps, site=site)[0]:
+                        monitor.set_host(host_name=host_name)
+                        validated_nodes[monitor_name] = True
+                        logging.info(f'Node {monitor_name} assigned to {host_name}')
+                        break
+                if not validated_nodes[monitor_name]:
+                    raise Exception(f"Could not place monitor for network {monitor.data.net_name} due to a lack of free workers. Please try another site.")
+        
+        for node in self.get_all_nodes():
+            node_name = node.get_name()
+            if validated_nodes[node_name]:
+                continue
+            site_name = node.get_site()
+            site = sitenames_to_sites.setdefault(site_name, fabresources.get_site(site_name))
+            hosts = sitenames_to_hosts.setdefault(site_name, site.get_hosts())
+            hostlist = list(hosts.items())
+            hostlist = sorted(hostlist)
+            for host_name, host in hostlist:
+                allocated_comps = allocated.setdefault(host_name, {})
+                if fablib._FablibManager__can_allocate_node_in_host(
+                    host=host, node=node, allocated=allocated_comps, site=site)[0]:
+                    node.set_host(host_name=host_name)
+                    validated_nodes[node_name] = True
+                    logging.info(f"Node {node_name} assigned to {host_name}")
+                    break
+            if not validated_nodes[node_name]:
+                raise Exception(f"Could not place node {node_name} due to a lack of free workers. Please try another site.")
+
+        self.do_allocate_hosts = False
+        self.set_crinkle_data()
+        logging.info(f"Hosts allocated")
+        for host_name in allocated:
+            site_name = host_name.split("-")[0].upper()
+            site = sitenames_to_sites.setdefault(site_name, fabresources.get_site(site_name))
+            hosts = sitenames_to_hosts.setdefault(site_name, site.get_hosts())
+            host = hosts[host_name]
+            allocated_comps = allocated[host_name]
+            logging.info(f"{host_name}: CPU {allocated_comps['core']}/{host.get_core_available()} "
+                            f"RAM {allocated_comps['ram']}/{host.get_ram_available()} "
+                            f"DISK {allocated_comps['disk']}/{host.get_disk_available()}")
     
     def submit(
         self,
@@ -872,110 +981,7 @@ class CrinkleSlice(Slice):
         if self.analyzer is None:
             raise Exception(f"Analyzer must be added before Crinkle slice submission using add_analyzer()")
         
-        if (self.do_allocate_hosts):
-            allocated = {}
-            logging.info("Allocating Monitors and their connected Nodes to different worker hosts")
-            sitenames_to_sites: dict[str, Site] = {}
-            sitenames_to_hosts: dict[str, dict[str, Host]] = {}
-            fablib = self.get_fablib_manager()
-            fabresources = fablib.get_resources()
-            validated_nodes: dict[str, bool] = {}
-
-            for node in self.get_all_nodes():
-                host_name = node.get_host()
-                if host_name is None:
-                    validated_nodes[node.get_name()] = False
-                    continue
-                allocated_comps = allocated.setdefault(host_name, {})
-                site_name = node.get_site()
-                site = sitenames_to_sites.setdefault(site_name, fabresources.get_site(site_name))
-                hosts = sitenames_to_hosts.setdefault(site_name, site.get_hosts())
-                host = hosts[host_name]
-                if fablib._FablibManager__can_allocate_node_in_host(
-                    host=host, node=node, allocated=allocated_comps, site=site)[0]:
-                    validated_nodes[node.get_name()] = True
-                else:
-                    raise Exception(f"Host {host_name} does not have the free resources to reserve Node {node.get_name()}")
-
-            for _, monitor in self.monitors.items():
-                logging.info(f"Allocating Monitor for network {monitor.data.net_name}")
-                if monitor.data.net_type == "L2Bridge":
-                    endpoint1 = self.get_node(name=monitor.creation_data[0][0])
-                    endpoint2 = self.get_node(name=monitor.creation_data[1][0])
-                    endpoints = [endpoint1, endpoint2]
-                    site_name = endpoint1.get_site()
-                    site = sitenames_to_sites.setdefault(site_name, fabresources.get_site(site_name))
-                    hosts = sitenames_to_hosts.setdefault(site_name, site.get_hosts())
-                    hostlist = list(hosts.items())
-                    hostlist = sorted(hostlist)
-                    #random.shuffle(hostlist)
-                    endhosts = {}
-                    for endpoint in endpoints:
-                        endpoint_name = endpoint.get_name()
-                        if validated_nodes[endpoint_name]:
-                            logging.info(f"Node {endpoint_name} already allocated to {endpoint.get_host()}")
-                            endhosts.setdefault(endpoint.get_host(), True)
-                            continue
-                        # TODO: instead, traverse hostlist in reverse
-                        for host_name, host in hostlist[1:]:
-                            allocated_comps = allocated.setdefault(host_name, {})
-                            if fablib._FablibManager__can_allocate_node_in_host(
-                                host=host, node=endpoint, allocated=allocated_comps, site=site)[0]:
-                                endpoint.set_host(host_name=host_name)
-                                endhosts.setdefault(host_name, True)
-                                validated_nodes[endpoint_name] = True
-                                logging.info(f'Node {endpoint_name} assigned to {host_name}')
-                                break
-                        if not validated_nodes[endpoint_name]:
-                            raise Exception(f"Could not place node {endpoint_name} due to a lack of free workers. Please try another site.")
-                    monitor_name = monitor.get_name()
-                    if validated_nodes.get(monitor_name, False):
-                        logging.info(f"Monitor {monitor_name} already allocated to {monitor.get_host()}")
-                        continue
-                    for host_name, host in hostlist:
-                        if host_name in endhosts:
-                            continue
-                        allocated_comps = allocated.setdefault(host_name, {})
-                        if fablib._FablibManager__can_allocate_node_in_host(
-                            host=host, node=monitor, allocated=allocated_comps, site=site)[0]:
-                            monitor.set_host(host_name=host_name)
-                            validated_nodes[monitor_name] = True
-                            logging.info(f'Node {monitor_name} assigned to {host_name}')
-                            break
-                    if not validated_nodes[monitor_name]:
-                        raise Exception(f"Could not place monitor for network {monitor.data.net_name} due to a lack of free workers. Please try another site.")
-            for node in self.get_all_nodes():
-                node_name = node.get_name()
-                if validated_nodes[node_name]:
-                    continue
-                site_name = node.get_site()
-                site = sitenames_to_sites.setdefault(site_name, fabresources.get_site(site_name))
-                hosts = sitenames_to_hosts.setdefault(site_name, site.get_hosts())
-                hostlist = list(hosts.items())
-                hostlist = sorted(hostlist)
-                for host_name, host in hostlist:
-                    allocated_comps = allocated.setdefault(host_name, {})
-                    if fablib._FablibManager__can_allocate_node_in_host(
-                        host=host, node=node, allocated=allocated_comps, site=site)[0]:
-                        node.set_host(host_name=host_name)
-                        validated_nodes[node_name] = True
-                        logging.info(f"Node {node_name} assigned to {host_name}")
-                        break
-                if not validated_nodes[node_name]:
-                    raise Exception(f"Could not place node {node_name} due to a lack of free workers. Please try another site.")
-
-
-            self.do_allocate_hosts = False
-            logging.info(f"Hosts allocated")
-            for host_name in allocated:
-                site_name = host_name.split("-")[0].upper()
-                site = sitenames_to_sites.setdefault(site_name, fabresources.get_site(site_name))
-                hosts = sitenames_to_hosts.setdefault(site_name, site.get_hosts())
-                host = hosts[host_name]
-                allocated_comps = allocated[host_name]
-                logging.info(f"{host_name}: CPU {allocated_comps['core']}/{host.get_core_available()} "
-                             f"RAM {allocated_comps['ram']}/{host.get_ram_available()} "
-                             f"DISK {allocated_comps['disk']}/{host.get_disk_available()}")
+        if (self.do_allocate_hosts): self.allocate_hosts()
         
         return super().submit(wait=wait, wait_timeout=wait_timeout, wait_interval=wait_interval, progress=progress, wait_jupyter=wait_jupyter, post_boot_config=post_boot_config, wait_ssh=wait_ssh,
                        extra_ssh_keys=extra_ssh_keys, lease_start_time=lease_start_time, lease_end_time=lease_end_time, lease_in_hours=lease_in_hours, validate=validate)
@@ -995,7 +1001,7 @@ class CrinkleSlice(Slice):
         """
         super().post_boot_config()
         logging.info(f"Crinkle post_boot_config")
-        if not self.did_post_boot:
+        if self.do_post_boot:
             self.analyzer = self.get_node(name=self.analyzer_name)
             site = self.analyzer.get_site()
             self.analyzer_cnet = self.get_l3network(name=f"{self.prefix}_ananet_{site}")
@@ -1064,7 +1070,7 @@ class CrinkleSlice(Slice):
             self.analyzer.execute_thread(f"sudo ./{REMOTEWORKDIR}/spade_reader.py {self.monitor_string}")
             logging.info(f"Saving slice data before rebooting monitors")
             print("Saving slice data before rebooting monitors")
-            self.did_post_boot = True
+            self.do_post_boot = False
             logging.info(f"Saving Crinkle Data")
             self.set_crinkle_data()
             self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
