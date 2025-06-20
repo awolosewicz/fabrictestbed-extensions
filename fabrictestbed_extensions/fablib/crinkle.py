@@ -986,6 +986,30 @@ class CrinkleSlice(Slice):
         return super().submit(wait=wait, wait_timeout=wait_timeout, wait_interval=wait_interval, progress=progress, wait_jupyter=wait_jupyter, post_boot_config=post_boot_config, wait_ssh=wait_ssh,
                        extra_ssh_keys=extra_ssh_keys, lease_start_time=lease_start_time, lease_end_time=lease_end_time, lease_in_hours=lease_in_hours, validate=validate)
     
+    def setup_ptp(self):
+        prereq_cmd = f"sudo apt update && sudo apt install -y ansible git"
+        git_cmd = f"cd {REMOTEWORKDIR} && git clone https://github.com/fabric-testbed/ptp.git"
+        ansible_cmd = f"cd {REMOTEWORKDIR}/ptp/ansible && ansible-playbook --connection=local --inventory 127.0.0.1, --limit 127.0.0.1 playbook_fabric_experiment_ptp.yml"
+        jobs = []
+        site_ads = {}
+        logging.info(f"Setting up PTP on Crinkle nodes")
+        print("Setting up PTP on Crinkle nodes")
+        jobs.append(self.analyzer.execute_thread(f"{prereq_cmd} && {git_cmd} && {ansible_cmd}"))
+        for monitor_name, monitor in self.monitors.items():
+            monitor_site = monitor.get_site()
+            site_ad = site_ads.setdefault(monitor_site, self.get_fablib_manager.get_site_advertisement(monitor_site))
+            if not site_ad["flags"]["ptp"]:
+                logging.warning(f"Site {monitor_site} does not support PTP, skipping setup for monitor {monitor_name}")
+                print(f"Site {monitor_site} does not support PTP, skipping setup for monitor {monitor_name}")
+                continue
+            jobs.append(monitor.execute_thread(f"{prereq_cmd} && {git_cmd} && {ansible_cmd}"))
+        ctr = 0
+        for _ in futures.as_completed(jobs):
+            ctr += 1
+            logging.info(f'{ctr}/{len(jobs)} jobs finished')
+            print(f'{ctr}/{len(jobs)} jobs finished')
+        self.do_ptp_setup = False
+
     def post_boot_config(self):
         """
         Runs post_boot_config identically to Slice.post_boot_config before running
@@ -1071,10 +1095,12 @@ class CrinkleSlice(Slice):
             logging.info(f"Saving slice data before rebooting monitors")
             print("Saving slice data before rebooting monitors")
             self.do_post_boot = False
+            if self.do_ptp_setup: self.setup_ptp()
             logging.info(f"Saving Crinkle Data")
             self.set_crinkle_data()
             self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
             self.update()
+
             logging.info(f"Rebooting Crinkle monitors")
             print("Rebooting Crinkle Resources")
             for monitor in self.monitors.values():
