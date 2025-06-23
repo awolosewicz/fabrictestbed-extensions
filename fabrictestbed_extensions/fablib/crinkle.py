@@ -997,8 +997,8 @@ class CrinkleSlice(Slice):
         jobs.append(self.analyzer.execute_thread(f"{prereq_cmd} && {git_cmd} && {ansible_cmd}"))
         for monitor_name, monitor in self.monitors.items():
             monitor_site = monitor.get_site()
-            site_ad = site_ads.setdefault(monitor_site, self.get_fablib_manager.get_site_advertisement(monitor_site))
-            if not site_ad["flags"]["ptp"]:
+            site_ad = site_ads.setdefault(monitor_site, self.get_fablib_manager().get_site_advertisement(monitor_site))
+            if not site_ad.flags.ptp:
                 logging.warning(f"Site {monitor_site} does not support PTP, skipping setup for monitor {monitor_name}")
                 print(f"Site {monitor_site} does not support PTP, skipping setup for monitor {monitor_name}")
                 continue
