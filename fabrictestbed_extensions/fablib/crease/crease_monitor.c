@@ -130,34 +130,6 @@ static struct rte_eth_conf port_conf = {
 	.txmode = {},
 };
 
-bool lendian = false;
-
-static inline uint16_t
-swap_endian_short(uint16_t value) {
-    return ((value >> 8)  & 0x00FF) |
-           ((value << 8)  & 0xFF00);
-}
-
-static inline uint32_t
-swap_endian(uint32_t value) {
-    return ((value >> 24) & 0x000000FF) |
-           ((value >> 8)  & 0x0000FF00) |
-           ((value << 8)  & 0x00FF0000) |
-           ((value << 24) & 0xFF000000);
-}
-
-static inline uint64_t
-swap_endian_long(uint64_t value) {
-    return ((value >> 56) & 0x00000000000000FF) |
-           ((value >> 40) & 0x000000000000FF00) |
-           ((value >> 24) & 0x0000000000FF0000) |
-           ((value >> 8)  & 0x00000000FF000000) |
-           ((value << 8)  & 0x000000FF00000000) |
-           ((value << 24) & 0x0000FF0000000000) |
-           ((value << 40) & 0x00FF000000000000) |
-           ((value << 56) & 0xFF00000000000000);
-}
-
 static void
 print_ethaddr(const char *name, struct rte_ether_addr *eth_addr)
 {
@@ -315,13 +287,6 @@ lcore_main(__rte_unused void *dummy)
 	struct timespec systime;
 	uint64_t systime_ns;
 	uint64_t last_burst_ns = 0;
-
-	// Tests for little endian memory, since we must write to packet
-	// buffers values in big-endian format
-	int num = 1;
-	if (*(char *)&num == 1) {
-        lendian = true;
-    }
 
 	for (i = 0; i < qconf->n_rx_queue; ++i) {
 		portid = qconf->rx_queue_list[i];
