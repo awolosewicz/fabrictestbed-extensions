@@ -36,8 +36,10 @@
 #define MONPROT 0x6587
 #define MONPROT0 0x65
 #define MONPROT1 0x87
+#define CREASEPROT 254
 
 #define MAX_PORTS 3
+#define MAX_LCORES 8
 
 #ifdef PROFILING
 #define TIME_BUILD_TRAILER 0
@@ -80,7 +82,9 @@ unsigned char ana_headers[64];
 // Ether(14) + IPv6(40) + len(2) + 2xUID(32)
 const uint16_t ana_size = 88;
 uint64_t mon_id;
-static struct rte_mempool *packet_pool, *clone_pool;
+uint16_t nb_ports;
+unsigned nb_lcores, c_lcore;
+static struct rte_mempool *packet_pool, *tx_pool, *clone_pool;
 
 static int rx_queue_per_lcore = 1;
 
@@ -107,6 +111,8 @@ struct __rte_cache_aligned lcore_queue_conf {
 	uint8_t rx_queue_list[MAX_RX_QUEUE_PER_LCORE];
 	uint16_t tx_queue_id[MAX_PORTS];
 	struct mbuf_table tx_mbufs[MAX_PORTS];
+	uint16_t buf_queue_id[MAX_PORTS];
+	struct mbuf_table buf_mbufs[MAX_PORTS];
 };
 static struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
@@ -116,6 +122,21 @@ struct __rte_cache_aligned pkt_metadata {
 	//uint32_t candidate_trailer;
 	//uint32_t ts_lower;
 };
+
+static inline long
+extract_long(uint8_t* ptr)
+{
+	return *ptr + (*(ptr + 1) << 8) + (*(ptr + 1) << 16) + (*(ptr + 1) << 24) +
+		   (*(ptr + 1) << 32) + (*(ptr + 1) << 40) + (*(ptr + 1) << 48) + (*(ptr + 1) << 56);
+}
+
+#define TYPE_REPLAY_START (uint8_t)1
+#define TYPE_REPLAY_CLEAR (uint8_t)2
+uint8_t c_to_tx[MAX_LCORES];
+uint8_t tx_to_c[MAX_LCORES];
+uint16_t c_ctrs[8];
+uint64_t replay_start = 1;
+uint64_t replay_end = 1;
 
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
@@ -181,7 +202,9 @@ crinkle_forward(
 	struct rte_mbuf *buf,
 	struct lcore_queue_conf *qconf,
 	const uint64_t systime_ns,
-	const uint64_t port)
+	const uint64_t port,
+	const uint64_t copy_replay_start,
+	const uint64_t copy_replay_end)
 {
 	uint16_t len;
 	uint16_t outport;
@@ -191,7 +214,11 @@ crinkle_forward(
 	uint32_t ts_lower = *(candidate_trailer_ptr-2);
 	uint8_t *trailer = rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16);
 	uint8_t *c;
+	struct rte_mbuf *tbuf;
 	struct rte_mbuf *cbuf;
+	if (unlikely ((tbuf = rte_pktmbuf_clone(buf, tx_pool)) == NULL)) {
+		return;
+	}
 	if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
 		return;
 	}
@@ -211,6 +238,7 @@ crinkle_forward(
 	}
 
 	uint16_t pkt_size = rte_cpu_to_be_64(buf->data_len);
+	tbuf->data_len = pkt_size;
 	if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
 		printf("Failed to append clone packet");
 		rte_pktmbuf_free(cbuf);
@@ -229,17 +257,49 @@ crinkle_forward(
 	}
 	
 	len = qconf->tx_mbufs[outport].len;
-	qconf->tx_mbufs[outport].m_table[len] = buf;
+	qconf->tx_mbufs[outport].m_table[len] = tbuf;
 	qconf->tx_mbufs[outport].len = ++len;
 	if (unlikely(BURST_SIZE == len))
 		send_burst(qconf, outport);
-
 	
 	len = qconf->tx_mbufs[vport_to_devport[0]].len;
 	qconf->tx_mbufs[vport_to_devport[0]].m_table[len] = cbuf;
 	qconf->tx_mbufs[vport_to_devport[0]].len = ++len;
 	if (unlikely(BURST_SIZE == len))
 	 	send_burst(qconf, vport_to_devport[0]);
+	
+	if (systime_ns <= copy_replay_end && systime_ns >= copy_replay_start) {
+		len = qconf->buf_mbufs[outport].len;
+		qconf->buf_mbufs[outport].m_table[len] = buf;
+		qconf->buf_mbufs[outport].len = ++len;
+	}
+}
+
+static inline void
+crinkle_command_handler(
+	struct rte_mbuf *buf,
+	struct lcore_queue_conf *qconf,
+	const uint64_t systime_ns)
+{
+	uint8_t* cursor = rte_pktmbuf_mtod_offset(buf, uint8_t*, 12);
+	if (*cursor != 0x86 || *(cursor + 1) != 0xDD) return;
+	cursor += 2 + 6;
+	if (*cursor != CREASEPROT) return;
+	cursor += 2 + 32;
+
+	if (*cursor == TYPE_REPLAY_START) {
+		replay_start = extract_long(++cursor);
+		cursor += 8;
+		replay_end = replay_start + extract_long(cursor);
+	}
+	else if (*cursor == TYPE_REPLAY_CLEAR) {
+		replay_end = 0;
+		for (unsigned i = 0; i < nb_lcores; ++i) {
+			if (i == c_lcore) continue;
+			c_to_tx[i] & TYPE_REPLAY_CLEAR;
+		}
+		c_ctrs[1] = nb_lcores - 1;
+	}
 }
 
 /*
@@ -277,7 +337,16 @@ lcore_main(__rte_unused void *dummy)
 	}
 
 	if (portid == vport_to_devport[0]) {
-		return 0;
+		while (1) {
+			for (uint16_t i = 0; i < nb_lcores; ++i) {
+				if (i == nb_lcores) continue;
+				if (tx_to_c[i] & TYPE_REPLAY_CLEAR) {
+					if(--c_ctrs[1] == 0) {
+						c_to_tx[i] | ~TYPE_REPLAY_CLEAR;
+					}
+				}
+			}
+		}
 	}
 	else {
 		while (1) {	
@@ -294,18 +363,27 @@ lcore_main(__rte_unused void *dummy)
 
 				for (j = 0; j < (nb_rx - PREFETCH_OFFSET); j++) {
 					rte_prefetch0(rte_pktmbuf_mtod(bufs[j + PREFETCH_OFFSET], void *));
-					crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid]);
+					crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
+									replay_start, replay_end);
 				}
 
 				/* Forward remaining prefetched packets */
 				for (; j < nb_rx; j++) {
-					crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid]);
+					crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
+									replay_start, replay_end);
 				}
 			}
 			/* Send out packets from TX queues */
 			if (unlikely(systime_ns - last_burst_ns >= BURST_TX_DRAIN_US*1000)) {
 				send_timeout_burst(qconf);
 				last_burst_ns = systime_ns;
+			}
+			if (c_to_tx[lcore_id] & TYPE_REPLAY_CLEAR) {
+				for (uint16_t i = 1; i < nb_ports; ++i) {
+					rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_table, qconf->buf_mbufs[i].len);
+					qconf->buf_mbufs[i].len = 0;
+				}
+				tx_to_c[lcore_id] & TYPE_REPLAY_CLEAR;
 			}
 		}
 	}
@@ -332,7 +410,7 @@ main(int argc, char *argv[])
 	argv += ret;
 
 	/* Check that there is an even number of ports to send/receive on. */
-	unsigned nb_ports = rte_eth_dev_count_avail();
+	nb_ports = rte_eth_dev_count_avail();
 	
 	int arg;
 	bool set_mon_id = false;
@@ -440,13 +518,19 @@ main(int argc, char *argv[])
 	if (packet_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init packet mbuf pool\n");
 
+	tx_pool = rte_pktmbuf_pool_create("tx_pool", NUM_MBUFS, MBUF_CACHE_SIZE,
+		0, 0, rte_socket_id());
+
+	if (tx_pool == NULL)
+		rte_exit(EXIT_FAILURE, "Cannot init transmit mbuf pool\n");
+
 	clone_pool = rte_pktmbuf_pool_create("clone_pool", NUM_MBUFS , MBUF_CACHE_SIZE,
 		0, 0, rte_socket_id());
 
 	if (clone_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init clone mbuf pool\n");
 
-	uint32_t nb_lcores = rte_lcore_count();
+	nb_lcores = rte_lcore_count();
 	uint16_t portid;
 	uint32_t n_tx_queue;
 	unsigned lcore_id = 0, rx_lcore_id = 0;
@@ -490,6 +574,8 @@ main(int argc, char *argv[])
 		printf("Initializing port %d on lcore %u... ", portid,
 		       rx_lcore_id);
 		fflush(stdout);
+
+		if (portid == devport_to_vport[0]) c_lcore = rx_lcore_id;
 
 		n_tx_queue = nb_lcores;
 		if (n_tx_queue > MAX_TX_QUEUE_PER_PORT)
