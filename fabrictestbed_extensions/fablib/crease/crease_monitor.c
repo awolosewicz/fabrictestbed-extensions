@@ -19,7 +19,7 @@
 #define NUM_MBUFS 8192
 #define MBUF_CACHE_SIZE 64
 #define BURST_SIZE 64
-#define BURST_TX_DRAIN_US 100 /* TX drain every ~100us */
+#define BURST_TX_DRAIN_US 10 /* TX drain every ~100us */
 /* Configure how many packets ahead to prefetch, when reading packets */
 #define PREFETCH_OFFSET	3
 
@@ -76,12 +76,6 @@ static inline uint64_t timespec64_to_ns(const struct timespec *ts)
 	return ((uint64_t) ts->tv_sec * NSEC_PER_SEC) + ts->tv_nsec;
 }
 
-/* basicfwd.c: Basic DPDK skeleton forwarding example. */
-#ifdef PROFILING
-static uint64_t measures[24];
-uint64_t start = 0;
-uint64_t pop_size = 0;
-#endif
 unsigned char ana_headers[64];
 // Ether(14) + IPv6(40) + len(2) + 2xUID(32)
 const uint16_t ana_size = 88;
@@ -163,19 +157,12 @@ send_burst(struct lcore_queue_conf *qconf, uint16_t port)
 static inline void
 send_timeout_burst(struct lcore_queue_conf *qconf)
 {
-	//uint64_t cur_tsc;
 	uint16_t portid;
-	//const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;
-
-	//cur_tsc = rte_rdtsc();
-	//if (likely (cur_tsc < qconf->tx_tsc + drain_tsc))
-	//	return;
 
 	for (portid = 0; portid < MAX_PORTS; portid++) {
 		if (qconf->tx_mbufs[portid].len != 0)
 			send_burst(qconf, portid);
 	}
-	//qconf->tx_tsc = cur_tsc;
 }
 
 /**
@@ -223,8 +210,6 @@ crinkle_forward(
 		rte_mov16(trailer, (uint8_t *)(&uid_trailer));
 	}
 
-
-
 	uint16_t pkt_size = rte_cpu_to_be_64(buf->data_len);
 	if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
 		printf("Failed to append clone packet");
@@ -236,8 +221,6 @@ crinkle_forward(
 	rte_mov16(c+56, (uint8_t *)(&uid_trailer));
 	rte_mov16(c+72, trailer);
 	
-
-	//uint64_t end5 = rte_get_tsc_cycles();
 
 	if (port == 1) {
 		outport = vport_to_devport[2];
@@ -320,7 +303,7 @@ lcore_main(__rte_unused void *dummy)
 				}
 			}
 			/* Send out packets from TX queues */
-			if (unlikely(systime_ns - last_burst_ns >= 100*1000)) {
+			if (unlikely(systime_ns - last_burst_ns >= BURST_TX_DRAIN_US*1000)) {
 				send_timeout_burst(qconf);
 				last_burst_ns = systime_ns;
 			}
