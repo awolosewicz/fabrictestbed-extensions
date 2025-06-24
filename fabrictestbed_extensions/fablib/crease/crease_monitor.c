@@ -19,7 +19,8 @@
 #define NUM_MBUFS 8192
 #define MBUF_CACHE_SIZE 64
 #define BURST_SIZE 64
-#define BURST_TX_DRAIN_US 10 /* TX drain every ~100us */
+#define MAX_REPLAY_SIZE 1024
+#define BURST_TX_DRAIN_US 10 /* TX drain every ~10us */
 /* Configure how many packets ahead to prefetch, when reading packets */
 #define PREFETCH_OFFSET	3
 
@@ -103,6 +104,12 @@ struct mbuf_table {
 	struct rte_mbuf *m_table[BURST_SIZE];
 };
 
+struct replay_mbuf_table {
+	uint16_t len;
+	uint64_t tsc_counts[MAX_REPLAY_SIZE];
+	struct rte_mbuf *m_table[MAX_REPLAY_SIZE];
+};
+
 #define MAX_RX_QUEUE_PER_LCORE 16
 #define MAX_TX_QUEUE_PER_PORT 16
 struct __rte_cache_aligned lcore_queue_conf {
@@ -112,7 +119,8 @@ struct __rte_cache_aligned lcore_queue_conf {
 	uint16_t tx_queue_id[MAX_PORTS];
 	struct mbuf_table tx_mbufs[MAX_PORTS];
 	uint16_t buf_queue_id[MAX_PORTS];
-	struct mbuf_table buf_mbufs[MAX_PORTS];
+	struct mbuf_table temp_buf_mbufs[MAX_PORTS];
+	struct replay_mbuf_table buf_mbufs[MAX_PORTS];
 };
 static struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
@@ -130,8 +138,12 @@ extract_long(uint8_t* ptr)
 		   (*(ptr + 1) << 32) + (*(ptr + 1) << 40) + (*(ptr + 1) << 48) + (*(ptr + 1) << 56);
 }
 
-#define TYPE_REPLAY_START (uint8_t)1
+#define TYPE_REPLAY_RECORD (uint8_t)1
 #define TYPE_REPLAY_CLEAR (uint8_t)2
+#define TYPE_REPLAY_RUN (uint8_t)4
+#define IDX_REPLAY_RECORD (uint8_t)0
+#define IDX_REPLAY_CLEAR (uint8_t)1
+#define IDX_REPLAY_RUN (uint8_t)2
 uint8_t c_to_tx[MAX_LCORES];
 uint8_t tx_to_c[MAX_LCORES];
 uint16_t c_ctrs[8];
@@ -155,7 +167,7 @@ print_ethaddr(const char *name, struct rte_ether_addr *eth_addr)
 
 /* Send burst of packets on an output interface */
 static void
-send_burst(struct lcore_queue_conf *qconf, uint16_t port)
+send_burst(struct lcore_queue_conf *qconf, uint16_t port, uint64_t systime_ns)
 {
 	struct rte_mbuf **m_table;
 	uint16_t n, queueid;
@@ -186,6 +198,12 @@ send_timeout_burst(struct lcore_queue_conf *qconf)
 	}
 }
 
+static inline uint16_t
+get_output_port(uint16_t input_port) {
+	if (input_port == 1) return vport_to_devport[2];
+	return vport_to_devport[1];
+}
+
 /**
  * This function handles adding (if needed) the custom trailer that stores the packet UID.
  * The UID is formed as:
@@ -201,8 +219,8 @@ static inline void
 crinkle_forward(
 	struct rte_mbuf *buf,
 	struct lcore_queue_conf *qconf,
+	const uint16_t port,
 	const uint64_t systime_ns,
-	const uint64_t port,
 	const uint64_t copy_replay_start,
 	const uint64_t copy_replay_end)
 {
@@ -249,12 +267,7 @@ crinkle_forward(
 	rte_mov16(c+56, (uint8_t *)(&uid_trailer));
 	rte_mov16(c+72, trailer);
 	
-
-	if (port == 1) {
-		outport = vport_to_devport[2];
-	} else {
-		outport = vport_to_devport[1];
-	}
+	outport = get_output_port(port);
 	
 	len = qconf->tx_mbufs[outport].len;
 	qconf->tx_mbufs[outport].m_table[len] = tbuf;
@@ -273,6 +286,26 @@ crinkle_forward(
 		qconf->buf_mbufs[outport].m_table[len] = buf;
 		qconf->buf_mbufs[outport].len = ++len;
 	}
+	else {
+		rte_pktmbuf_free(buf);
+	}
+}
+
+static inline void
+run_replay(
+	struct lcore_queue_conf *qconf,
+	const uint16_t port,
+	const uint64_t systime_ns,
+	const uint64_t start_time
+)
+{
+	if (unlikely(qconf->buf_mbufs[port].len == 0)) return;
+	struct rte_mbuf* tx_bufs[BURST_SIZE];
+	uint16_t ptr = 0;
+
+	while (qconf->buf_mbufs[port].len > 0) {
+
+	}
 }
 
 static inline void
@@ -287,15 +320,18 @@ crinkle_command_handler(
 	if (*cursor != CREASEPROT) return;
 	cursor += 2 + 32;
 
-	if (*cursor == TYPE_REPLAY_START) {
+	if (*cursor == TYPE_REPLAY_RECORD) {
 		replay_start = extract_long(++cursor);
 		cursor += 8;
 		replay_end = replay_start + extract_long(cursor);
 	}
 	else if (*cursor == TYPE_REPLAY_CLEAR) {
+		// if c_ctrs is > 0, that means one or more worker threads have not finished
+		// handling the last command
+		if (unlikely(c_ctrs[IDX_REPLAY_CLEAR] > 0)) return;
 		replay_end = 0;
 		for (unsigned i = 0; i < nb_lcores; ++i) {
-			if (i == c_lcore) continue;
+			if (unlikely(i == c_lcore)) continue;
 			c_to_tx[i] & TYPE_REPLAY_CLEAR;
 		}
 		c_ctrs[1] = nb_lcores - 1;
@@ -339,11 +375,9 @@ lcore_main(__rte_unused void *dummy)
 	if (portid == vport_to_devport[0]) {
 		while (1) {
 			for (uint16_t i = 0; i < nb_lcores; ++i) {
-				if (i == nb_lcores) continue;
+				if (unlikely(i == c_lcore)) continue;
 				if (tx_to_c[i] & TYPE_REPLAY_CLEAR) {
-					if(--c_ctrs[1] == 0) {
-						c_to_tx[i] | ~TYPE_REPLAY_CLEAR;
-					}
+					--c_ctrs[IDX_REPLAY_CLEAR];
 				}
 			}
 		}
@@ -384,6 +418,7 @@ lcore_main(__rte_unused void *dummy)
 					qconf->buf_mbufs[i].len = 0;
 				}
 				tx_to_c[lcore_id] & TYPE_REPLAY_CLEAR;
+				c_to_tx[i] | ~TYPE_REPLAY_CLEAR;
 			}
 		}
 	}
@@ -636,6 +671,7 @@ main(int argc, char *argv[])
 
 			qconf = &lcore_queue_conf[lcore_id];
 			qconf->tx_queue_id[portid] = queueid;
+			qconf->buf_queue_id[portid] = queueid;
 			queueid++;
 		}
 		ret = rte_eth_promiscuous_enable(portid);
