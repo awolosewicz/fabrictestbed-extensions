@@ -19,7 +19,7 @@
 #define NUM_MBUFS 8192
 #define MBUF_CACHE_SIZE 64
 #define BURST_SIZE 64
-#define MAX_REPLAY_SIZE 1024
+#define MAX_REPLAY_BURSTS 131072
 #define BURST_TX_DRAIN_US 10 /* TX drain every ~10us */
 /* Configure how many packets ahead to prefetch, when reading packets */
 #define PREFETCH_OFFSET	3
@@ -102,12 +102,14 @@ static uint16_t devport_to_vport[MAX_PORTS];
 struct mbuf_table {
 	uint16_t len;
 	struct rte_mbuf *m_table[BURST_SIZE];
+	struct rte_mbuf *t_table[BURST_SIZE];
 };
 
 struct replay_mbuf_table {
-	uint16_t len;
-	uint64_t tsc_counts[MAX_REPLAY_SIZE];
-	struct rte_mbuf *m_table[MAX_REPLAY_SIZE];
+	uint32_t len;
+	uint64_t tsc_counts[MAX_REPLAY_BURSTS];
+	uint16_t m_lens[MAX_REPLAY_BURSTS];
+	struct rte_mbuf **m_tables[MAX_REPLAY_BURSTS];
 };
 
 #define MAX_RX_QUEUE_PER_LCORE 16
@@ -119,7 +121,6 @@ struct __rte_cache_aligned lcore_queue_conf {
 	uint16_t tx_queue_id[MAX_PORTS];
 	struct mbuf_table tx_mbufs[MAX_PORTS];
 	uint16_t buf_queue_id[MAX_PORTS];
-	struct mbuf_table temp_buf_mbufs[MAX_PORTS];
 	struct replay_mbuf_table buf_mbufs[MAX_PORTS];
 };
 static struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
@@ -147,8 +148,8 @@ extract_long(uint8_t* ptr)
 uint8_t c_to_tx[MAX_LCORES];
 uint8_t tx_to_c[MAX_LCORES];
 uint16_t c_ctrs[8];
-uint64_t replay_start = 1;
-uint64_t replay_end = 1;
+uint64_t replay_start = 0;
+uint64_t replay_end = 0;
 
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
@@ -167,39 +168,86 @@ print_ethaddr(const char *name, struct rte_ether_addr *eth_addr)
 
 /* Send burst of packets on an output interface */
 static void
-send_burst(struct lcore_queue_conf *qconf, uint16_t port, uint64_t systime_ns)
+send_burst(
+	struct lcore_queue_conf *qconf,
+	const uint16_t outport)
 {
 	struct rte_mbuf **m_table;
-	uint16_t n, queueid;
+	uint16_t len, queueid;
 	int ret;
 
-	queueid = qconf->tx_queue_id[port];
-	m_table = (struct rte_mbuf **)qconf->tx_mbufs[port].m_table;
-	n = qconf->tx_mbufs[port].len;
+	queueid = qconf->tx_queue_id[outport];
+	m_table = (struct rte_mbuf **)qconf->tx_mbufs[outport].m_table;
+	len = qconf->tx_mbufs[outport].len;
 
-	ret = rte_eth_tx_burst(port, queueid, m_table, n);
-	while (unlikely (ret < n)) {
+	ret = rte_eth_tx_burst(outport, queueid, m_table, len);
+	while (unlikely (ret < len)) {
 		rte_pktmbuf_free(m_table[ret]);
 		ret++;
 	}
 
-	qconf->tx_mbufs[port].len = 0;
+	qconf->tx_mbufs[outport].len = 0;
+}
+
+static void
+send_burst_replayable(
+	struct lcore_queue_conf *qconf,
+	const uint16_t outport,
+	const uint64_t systime_ns,
+	const uint64_t copy_replay_start,
+	const uint64_t copy_replay_end)
+{
+	struct rte_mbuf **t_table, **m_table;
+	uint32_t rep_len;
+	uint16_t len, queueid;
+	int ret;
+
+	queueid = qconf->tx_queue_id[outport];
+	m_table = (struct rte_mbuf **)qconf->tx_mbufs[outport].m_table;
+	t_table = (struct rte_mbuf **)qconf->tx_mbufs[outport].t_table;
+	len = qconf->tx_mbufs[outport].len;
+
+	ret = rte_eth_tx_burst(outport, queueid, t_table, len);
+	while (unlikely (ret < len)) {
+		rte_pktmbuf_free(t_table[ret]);
+		ret++;
+	}
+
+	if (unlikely(systime_ns <= copy_replay_end && systime_ns >= copy_replay_start)) {
+		rep_len = qconf->buf_mbufs[outport].len;
+		if (unlikely(rep_len >= MAX_REPLAY_BURSTS)) {
+			printf("Replay buffer overflow, not storing packets\n");
+			rte_pktmbuf_free_bulk(m_table, len);
+			qconf->tx_mbufs[outport].len = 0;
+			return;
+		}
+		rte_memcpy(qconf->buf_mbufs[outport].m_tables[rep_len], m_table, len * sizeof(struct rte_mbuf*));
+		qconf->buf_mbufs[outport].tsc_counts[rep_len] = rte_rdtsc_precise();
+		qconf->buf_mbufs[outport].len = ++rep_len;
+	}
+	else {
+		rte_pktmbuf_free_bulk(m_table, len);
+	}
+
+	qconf->tx_mbufs[outport].len = 0;
 }
 
 /* Send burst of outgoing packet, if timeout expires. */
 static inline void
-send_timeout_burst(struct lcore_queue_conf *qconf)
+send_timeout_burst(struct lcore_queue_conf *qconf, const uint64_t systime_ns)
 {
 	uint16_t portid;
 
 	for (portid = 0; portid < MAX_PORTS; portid++) {
 		if (qconf->tx_mbufs[portid].len != 0)
-			send_burst(qconf, portid);
+			if (portid == vport_to_devport[0]) send_burst(qconf, portid);
+			else send_burst_replayable(qconf, portid, systime_ns, replay_start, replay_end);
 	}
 }
 
+/* Get the output devport of input vport */
 static inline uint16_t
-get_output_port(uint16_t input_port) {
+get_output_port_from_vport(uint16_t input_port) {
 	if (input_port == 1) return vport_to_devport[2];
 	return vport_to_devport[1];
 }
@@ -267,28 +315,20 @@ crinkle_forward(
 	rte_mov16(c+56, (uint8_t *)(&uid_trailer));
 	rte_mov16(c+72, trailer);
 	
-	outport = get_output_port(port);
+	outport = get_output_port_from_vport(port);
 	
 	len = qconf->tx_mbufs[outport].len;
-	qconf->tx_mbufs[outport].m_table[len] = tbuf;
+	qconf->tx_mbufs[outport].m_table[len] = buf;
+	qconf->tx_mbufs[outport].t_table[len] = tbuf;
 	qconf->tx_mbufs[outport].len = ++len;
 	if (unlikely(BURST_SIZE == len))
-		send_burst(qconf, outport);
+		send_burst_replayable(qconf, outport, systime_ns, copy_replay_start, copy_replay_end);
 	
 	len = qconf->tx_mbufs[vport_to_devport[0]].len;
 	qconf->tx_mbufs[vport_to_devport[0]].m_table[len] = cbuf;
 	qconf->tx_mbufs[vport_to_devport[0]].len = ++len;
 	if (unlikely(BURST_SIZE == len))
 	 	send_burst(qconf, vport_to_devport[0]);
-	
-	if (systime_ns <= copy_replay_end && systime_ns >= copy_replay_start) {
-		len = qconf->buf_mbufs[outport].len;
-		qconf->buf_mbufs[outport].m_table[len] = buf;
-		qconf->buf_mbufs[outport].len = ++len;
-	}
-	else {
-		rte_pktmbuf_free(buf);
-	}
 }
 
 static inline void
@@ -301,11 +341,25 @@ run_replay(
 {
 	if (unlikely(qconf->buf_mbufs[port].len == 0)) return;
 	struct rte_mbuf* tx_bufs[BURST_SIZE];
-	uint16_t ptr = 0;
+	uint32_t ptr = 0;
+	int ret;
 
-	while (qconf->buf_mbufs[port].len > 0) {
+	uint64_t tsc_delta = (start_time - replay_start) * tsc_hz / NSEC_PER_SEC;
+	uint64_t tsc_start = qconf->buf_mbufs[port].tsc_counts[0] + tsc_delta;
 
+	while (qconf->buf_mbufs[port].len > 0 && ptr < qconf->buf_mbufs[port].len) {
+		if (tsc_start <= rte_rdtsc_precise()) {
+			ret = rte_eth_tx_burst(port, qconf->tx_queue_id[port],
+								   qconf->buf_mbufs[port].m_tables[ptr], qconf->buf_mbufs[port].m_lens[ptr]);
+			if (unlikely(ret < qconf->buf_mbufs[port].m_lens[ptr])) {
+				rte_pktmbuf_free_bulk(&qconf->buf_mbufs[port].m_tables[ptr][ret], qconf->buf_mbufs[port].m_lens[ptr] - ret);
+			}
+			qconf->buf_mbufs[port].m_lens[ptr] = 0;
+			++ptr;
+			tsc_start = qconf->buf_mbufs[port].tsc_counts[ptr] + tsc_delta;
+		}
 	}
+	qconf->buf_mbufs[port].len = 0;
 }
 
 static inline void
@@ -329,12 +383,23 @@ crinkle_command_handler(
 		// if c_ctrs is > 0, that means one or more worker threads have not finished
 		// handling the last command
 		if (unlikely(c_ctrs[IDX_REPLAY_CLEAR] > 0)) return;
+		if (unlikely(c_ctrs[IDX_REPLAY_RUN] > 0)) return;
 		replay_end = 0;
 		for (unsigned i = 0; i < nb_lcores; ++i) {
 			if (unlikely(i == c_lcore)) continue;
-			c_to_tx[i] & TYPE_REPLAY_CLEAR;
+			c_to_tx[i] |= TYPE_REPLAY_CLEAR;
 		}
-		c_ctrs[1] = nb_lcores - 1;
+		c_ctrs[IDX_REPLAY_CLEAR] = nb_lcores - 1;
+	}
+	else if (*cursor == TYPE_REPLAY_RUN) {
+		if (unlikely(replay_end == 0 || systime_ns < replay_end)) return;
+		if (unlikely(c_ctrs[IDX_REPLAY_CLEAR] > 0)) return;
+		if (unlikely(c_ctrs[IDX_REPLAY_RUN] > 0)) return;
+		for (unsigned i = 0; i < nb_lcores; ++i) {
+			if (unlikely(i == c_lcore)) continue;
+			c_to_tx[i] |= TYPE_REPLAY_RUN;
+		}
+		c_ctrs[IDX_REPLAY_RUN] = nb_lcores - 1;
 	}
 }
 
@@ -378,6 +443,11 @@ lcore_main(__rte_unused void *dummy)
 				if (unlikely(i == c_lcore)) continue;
 				if (tx_to_c[i] & TYPE_REPLAY_CLEAR) {
 					--c_ctrs[IDX_REPLAY_CLEAR];
+					tx_to_c[i] &= ~TYPE_REPLAY_CLEAR;
+				}
+				if (tx_to_c[i] & TYPE_REPLAY_RUN) {
+					--c_ctrs[IDX_REPLAY_RUN];
+					tx_to_c[i] &= ~TYPE_REPLAY_RUN;
 				}
 			}
 		}
@@ -407,18 +477,29 @@ lcore_main(__rte_unused void *dummy)
 									replay_start, replay_end);
 				}
 			}
+
 			/* Send out packets from TX queues */
 			if (unlikely(systime_ns - last_burst_ns >= BURST_TX_DRAIN_US*1000)) {
-				send_timeout_burst(qconf);
+				send_timeout_burst(qconf, systime_ns);
 				last_burst_ns = systime_ns;
 			}
+
 			if (c_to_tx[lcore_id] & TYPE_REPLAY_CLEAR) {
 				for (uint16_t i = 1; i < nb_ports; ++i) {
-					rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_table, qconf->buf_mbufs[i].len);
+					if (qconf->buf_mbufs[i].len == 0) continue;
+					for (uint16_t j = 0; j < qconf->buf_mbufs[i].len; ++j) {
+						rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[j], qconf->buf_mbufs[i].m_lens[j]);
+						qconf->buf_mbufs[i].m_lens[j] = 0;
+					}
 					qconf->buf_mbufs[i].len = 0;
 				}
-				tx_to_c[lcore_id] & TYPE_REPLAY_CLEAR;
-				c_to_tx[i] | ~TYPE_REPLAY_CLEAR;
+				tx_to_c[lcore_id] |= TYPE_REPLAY_CLEAR;
+				c_to_tx[i] &= ~TYPE_REPLAY_CLEAR;
+			}
+			else if (c_to_tx[lcore_id] & TYPE_REPLAY_RUN) {
+				run_replay(qconf, get_output_port_from_vport(devport_to_vport[portid]), systime_ns, replay_start);
+				tx_to_c[lcore_id] |= TYPE_REPLAY_RUN;
+				c_to_tx[i] &= ~TYPE_REPLAY_RUN;
 			}
 		}
 	}
