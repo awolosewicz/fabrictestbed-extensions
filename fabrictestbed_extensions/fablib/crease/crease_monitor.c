@@ -19,7 +19,7 @@
 #define NUM_MBUFS 8192
 #define MBUF_CACHE_SIZE 64
 #define BURST_SIZE 64
-#define MAX_REPLAY_BURSTS 131072
+#define MAX_REPLAY_BURSTS 8192
 #define BURST_TX_DRAIN_US 10 /* TX drain every ~10us */
 /* Configure how many packets ahead to prefetch, when reading packets */
 #define PREFETCH_OFFSET	3
@@ -29,48 +29,14 @@
 #define MAX_RX_MTU 1500
 
 #define	PKT_MBUF_DATA_SIZE	RTE_MBUF_DEFAULT_BUF_SIZE
-#define	HDR_MBUF_DATA_SIZE	128 + RTE_PKTMBUF_HEADROOM
-#define	TLR_MBUF_DATA_SIZE	128 + RTE_PKTMBUF_HEADROOM
 
 #define NSEC_PER_SEC        1000000000L
 
 #define MONPROT 0x6587
-#define MONPROT0 0x65
-#define MONPROT1 0x87
 #define CREASEPROT 254
 
 #define MAX_PORTS 3
 #define MAX_LCORES 8
-
-#ifdef PROFILING
-#define TIME_BUILD_TRAILER 0
-#define TIME_ADD_TRAILER 1
-#define TIME_ADD_HEADERS 2
-#define TIME_OTHER 3
-#define TIME_TX_PKTS 4
-#define TIME_GET_TIME 5
-
-#define TIME_AVG_BUILD_TRAILER 6
-#define TIME_AVG_ADD_TRAILER 7
-#define TIME_AVG_ADD_HEADERS 8
-#define TIME_AVG_OTHER 9
-#define TIME_AVG_TX_PKTS 10
-#define TIME_AVG_GET_TIME 11
-
-#define TIME_MAX_BUILD_TRAILER 12
-#define TIME_MAX_ADD_TRAILER 13
-#define TIME_MAX_ADD_HEADERS 14
-#define TIME_MAX_OTHER 15
-#define TIME_MAX_TX_PKTS 16
-#define TIME_MAX_GET_TIME 17
-
-#define TIME_MDEV_BUILD_TRAILER 18
-#define TIME_MDEV_ADD_TRAILER 19
-#define TIME_MDEV_ADD_HEADERS 20
-#define TIME_MDEV_OTHER 21
-#define TIME_MDEV_TX_PKTS 22
-#define TIME_MDEV_GET_TIME 23
-#endif
 
 static uint64_t tsc_hz;
 
@@ -89,11 +55,10 @@ static struct rte_mempool *packet_pool, *tx_pool, *clone_pool;
 
 static int rx_queue_per_lcore = 1;
 
-#define RX_RING_SIZE 1024
-#define TX_RING_SIZE 1024
+#define RX_RING_SIZE 512
+#define TX_RING_SIZE 2048
 static uint16_t nb_rxd = RX_RING_SIZE;
 static uint16_t nb_txd = TX_RING_SIZE;
-/* ethernet addresses of ports */
 static struct rte_ether_addr ports_eth_addr[MAX_PORTS];
 
 static uint16_t vport_to_devport[MAX_PORTS];
@@ -628,7 +593,7 @@ main(int argc, char *argv[])
 		}
 	}
 
-	packet_pool = rte_pktmbuf_pool_create("packet_pool", NUM_MBUFS, MBUF_CACHE_SIZE,
+	packet_pool = rte_pktmbuf_pool_create("packet_pool", MAX_REPLAY_BURSTS*BURST_SIZE, MBUF_CACHE_SIZE,
 		0, PKT_MBUF_DATA_SIZE, rte_socket_id());
 
 	if (packet_pool == NULL)
