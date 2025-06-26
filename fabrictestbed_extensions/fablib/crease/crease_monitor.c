@@ -15,11 +15,13 @@
 #include <rte_cycles.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
+#include <rte_malloc.h>
 
 #define NUM_MBUFS 8192
 #define MBUF_CACHE_SIZE 64
 #define BURST_SIZE 64
 #define MAX_REPLAY_BURSTS 8192
+#define MIN_REPLAY_SIZE 128
 #define BURST_TX_DRAIN_US 10 /* TX drain every ~10us */
 /* Configure how many packets ahead to prefetch, when reading packets */
 #define PREFETCH_OFFSET	3
@@ -50,7 +52,7 @@ unsigned char ana_headers[64];
 const uint16_t ana_size = 88;
 uint64_t mon_id;
 uint16_t nb_ports;
-unsigned nb_lcores, c_lcore;
+unsigned nb_lcores, c_lcore, max_replay_size;
 static struct rte_mempool *packet_pool, *tx_pool, *clone_pool;
 
 static int rx_queue_per_lcore = 1;
@@ -70,11 +72,15 @@ struct mbuf_table {
 	struct rte_mbuf *t_table[BURST_SIZE];
 };
 
+struct mbuf_table_light {
+	struct rte_mbuf *m_table[BURST_SIZE];
+};
+
 struct replay_mbuf_table {
 	uint32_t len;
-	uint64_t tsc_counts[MAX_REPLAY_BURSTS];
-	uint16_t m_lens[MAX_REPLAY_BURSTS];
-	struct rte_mbuf **m_tables[MAX_REPLAY_BURSTS];
+	uint64_t *tsc_counts;
+	uint16_t *m_lens;
+	struct mbuf_table_light *m_tables;
 };
 
 #define MAX_RX_QUEUE_PER_LCORE 16
@@ -180,13 +186,13 @@ send_burst_replayable(
 
 	if (unlikely(systime_ns <= copy_replay_end && systime_ns >= copy_replay_start)) {
 		rep_len = qconf->buf_mbufs[outport].len;
-		if (unlikely(rep_len >= MAX_REPLAY_BURSTS)) {
+		if (unlikely(rep_len >= max_replay_size)) {
 			printf("Replay buffer overflow, not storing packets\n");
 			rte_pktmbuf_free_bulk(m_table, len);
 			qconf->tx_mbufs[outport].len = 0;
 			return;
 		}
-		rte_memcpy(qconf->buf_mbufs[outport].m_tables[rep_len], m_table, len * sizeof(struct rte_mbuf*));
+		rte_memcpy(qconf->buf_mbufs[outport].m_tables[rep_len].m_table, m_table, len * sizeof(struct rte_mbuf*));
 		qconf->buf_mbufs[outport].tsc_counts[rep_len] = rte_rdtsc_precise();
 		qconf->buf_mbufs[outport].len = ++rep_len;
 	}
@@ -315,9 +321,9 @@ run_replay(
 	while (qconf->buf_mbufs[port].len > 0 && ptr < qconf->buf_mbufs[port].len) {
 		if (tsc_start <= rte_rdtsc_precise()) {
 			ret = rte_eth_tx_burst(port, qconf->tx_queue_id[port],
-								   qconf->buf_mbufs[port].m_tables[ptr], qconf->buf_mbufs[port].m_lens[ptr]);
+								   qconf->buf_mbufs[port].m_tables[ptr].m_table, qconf->buf_mbufs[port].m_lens[ptr]);
 			if (unlikely(ret < qconf->buf_mbufs[port].m_lens[ptr])) {
-				rte_pktmbuf_free_bulk(&qconf->buf_mbufs[port].m_tables[ptr][ret], qconf->buf_mbufs[port].m_lens[ptr] - ret);
+				rte_pktmbuf_free_bulk(&qconf->buf_mbufs[port].m_tables[ptr].m_table[ret], qconf->buf_mbufs[port].m_lens[ptr] - ret);
 			}
 			qconf->buf_mbufs[port].m_lens[ptr] = 0;
 			++ptr;
@@ -453,7 +459,7 @@ lcore_main(__rte_unused void *dummy)
 				for (uint16_t i = 1; i < nb_ports; ++i) {
 					if (qconf->buf_mbufs[i].len == 0) continue;
 					for (uint16_t j = 0; j < qconf->buf_mbufs[i].len; ++j) {
-						rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[j], qconf->buf_mbufs[i].m_lens[j]);
+						rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[j].m_table, qconf->buf_mbufs[i].m_lens[j]);
 						qconf->buf_mbufs[i].m_lens[j] = 0;
 					}
 					qconf->buf_mbufs[i].len = 0;
@@ -505,7 +511,7 @@ main(int argc, char *argv[])
 	bool macdst = false;
 	bool ipdst = false;
 
-	while ((arg = getopt(argc, argv, "n:d:m:i:hv")) != -1) {
+	while ((arg = getopt(argc, argv, "n:d:m:i:r:hv")) != -1) {
 		switch (arg) {
 			case 'n':
 				mon_id = strtol(optarg, NULL, 0);
@@ -552,6 +558,9 @@ main(int argc, char *argv[])
 					ipdst = true;
 				}
 				break;
+			case 'r':
+				sscanf(optarg, "%u", &max_replay_size);
+				break;
 			case 'h':
 				printf("Available options:\n");
 				printf("  -n    Set monitor ID\n");
@@ -592,8 +601,9 @@ main(int argc, char *argv[])
 			rte_exit(EXIT_FAILURE, "Invalid port mapping for virtual port %hu: %hu.\n", i, vport_to_devport[i]);
 		}
 	}
+	if (max_replay_size < MIN_REPLAY_SIZE) max_replay_size = MIN_REPLAY_SIZE;
 
-	packet_pool = rte_pktmbuf_pool_create("packet_pool", MAX_REPLAY_BURSTS*BURST_SIZE, MBUF_CACHE_SIZE,
+	packet_pool = rte_pktmbuf_pool_create("packet_pool", max_replay_size*BURST_SIZE, MBUF_CACHE_SIZE,
 		0, PKT_MBUF_DATA_SIZE, rte_socket_id());
 
 	if (packet_pool == NULL)
@@ -718,8 +728,13 @@ main(int argc, char *argv[])
 			qconf = &lcore_queue_conf[lcore_id];
 			qconf->tx_queue_id[portid] = queueid;
 			qconf->buf_queue_id[portid] = queueid;
+
+			qconf->buf_mbufs[portid].tsc_counts = rte_malloc("uint64_t", max_replay_size*sizeof(uint64_t), 0);
+			qconf->buf_mbufs[portid].m_lens = rte_malloc("uint16_t", max_replay_size*sizeof(uint16_t), 0);
+			qconf->buf_mbufs[portid].m_tables = rte_malloc("mbuf_table_light", max_replay_size*sizeof(struct mbuf_table_light), 0);
 			queueid++;
 		}
+
 		ret = rte_eth_promiscuous_enable(portid);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE,
