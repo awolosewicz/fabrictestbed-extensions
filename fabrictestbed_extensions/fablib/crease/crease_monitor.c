@@ -103,11 +103,17 @@ struct __rte_cache_aligned pkt_metadata {
 	//uint32_t ts_lower;
 };
 
-static inline long
+static inline uint64_t
 extract_long(uint8_t* ptr)
 {
-	return *ptr + (*(ptr + 1) << 8) + (*(ptr + 1) << 16) + (*(ptr + 1) << 24) +
-		   (*(ptr + 1) << 32) + (*(ptr + 1) << 40) + (*(ptr + 1) << 48) + (*(ptr + 1) << 56);
+	return (uint64_t)ptr[0] |
+		   ((uint64_t)ptr[1] << 8) |
+		   ((uint64_t)ptr[2] << 16) |
+		   ((uint64_t)ptr[3] << 24) |
+		   ((uint64_t)ptr[4] << 32) |
+		   ((uint64_t)ptr[5] << 40) |
+		   ((uint64_t)ptr[6] << 48) |
+		   ((uint64_t)ptr[7] << 56);
 }
 
 #define TYPE_REPLAY_RECORD (uint8_t)1
@@ -210,9 +216,14 @@ send_timeout_burst(struct lcore_queue_conf *qconf, const uint64_t systime_ns)
 	uint16_t portid;
 
 	for (portid = 0; portid < MAX_PORTS; portid++) {
-		if (qconf->tx_mbufs[portid].len != 0)
-			if (portid == vport_to_devport[0]) send_burst(qconf, portid);
-			else send_burst_replayable(qconf, portid, systime_ns, replay_start, replay_end);
+		if (qconf->tx_mbufs[portid].len != 0) {
+			if (portid == vport_to_devport[0]) {
+				send_burst(qconf, portid);
+			}
+			else {
+				send_burst_replayable(qconf, portid, systime_ns, replay_start, replay_end);
+			}
+		}
 	}
 }
 
@@ -238,7 +249,7 @@ static inline void
 crinkle_forward(
 	struct rte_mbuf *buf,
 	struct lcore_queue_conf *qconf,
-	const uint16_t port,
+	const uint64_t port,
 	const uint64_t systime_ns,
 	const uint64_t copy_replay_start,
 	const uint64_t copy_replay_end)
@@ -306,12 +317,10 @@ static inline void
 run_replay(
 	struct lcore_queue_conf *qconf,
 	const uint16_t port,
-	const uint64_t systime_ns,
 	const uint64_t start_time
 )
 {
 	if (unlikely(qconf->buf_mbufs[port].len == 0)) return;
-	struct rte_mbuf* tx_bufs[BURST_SIZE];
 	uint32_t ptr = 0;
 	int ret;
 
@@ -336,7 +345,6 @@ run_replay(
 static inline void
 crinkle_command_handler(
 	struct rte_mbuf *buf,
-	struct lcore_queue_conf *qconf,
 	const uint64_t systime_ns)
 {
 	uint8_t* cursor = rte_pktmbuf_mtod_offset(buf, uint8_t*, 12);
@@ -468,7 +476,7 @@ lcore_main(__rte_unused void *dummy)
 				c_to_tx[i] &= ~TYPE_REPLAY_CLEAR;
 			}
 			else if (c_to_tx[lcore_id] & TYPE_REPLAY_RUN) {
-				run_replay(qconf, get_output_port_from_vport(devport_to_vport[portid]), systime_ns, replay_start);
+				run_replay(qconf, get_output_port_from_vport(devport_to_vport[portid]), replay_start);
 				tx_to_c[lcore_id] |= TYPE_REPLAY_RUN;
 				c_to_tx[i] &= ~TYPE_REPLAY_RUN;
 			}
