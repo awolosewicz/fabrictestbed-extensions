@@ -248,8 +248,8 @@ static inline void
 crinkle_forward(
 	struct rte_mbuf *buf,
 	struct lcore_queue_conf *qconf,
-	const uint64_t port,
 	const uint64_t systime_ns,
+	const uint64_t port,
 	const uint64_t copy_replay_start,
 	const uint64_t copy_replay_end)
 {
@@ -272,7 +272,7 @@ crinkle_forward(
 
 	// Build trailer
 	uid_trailer.systime_ns = rte_cpu_to_be_64(systime_ns);
-	uid_trailer.trailer = rte_cpu_to_be_64((mon_id << 48) + (port << 32) + ((uid_trailer.systime_ns << 16) & 0x00000000FFFF0000) + MONPROT);
+	uid_trailer.trailer = rte_cpu_to_be_64((mon_id << 48) | (port << 32) | ((uid_trailer.systime_ns << 16) & 0x00000000FFFF0000) | MONPROT);
 
 	// Check for existing UUID trailer
 	if ((candidate_trailer & 0x0000FFFF) != MONPROT || (candidate_trailer >> 16) != (ts_lower & 0x0000FFFF)) {
@@ -284,8 +284,9 @@ crinkle_forward(
 		rte_mov16(trailer, (uint8_t *)(&uid_trailer));
 	}
 
-	uint16_t pkt_size = rte_cpu_to_be_64(buf->data_len);
-	tbuf->data_len = pkt_size;
+	uint16_t pkt_size = rte_cpu_to_be_16(buf->data_len);
+	tbuf->data_len = buf->data_len;
+	tbuf->pkt_len = buf->pkt_len;
 	if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
 		printf("Failed to append clone packet");
 		rte_pktmbuf_free(cbuf);
@@ -438,6 +439,8 @@ lcore_main(__rte_unused void *dummy)
 					tx_to_c[k] &= ~TYPE_REPLAY_RUN;
 				}
 			}
+
+			rte_pktmbuf_free_bulk(bufs, nb_rx);
 		}
 	}
 	else {
