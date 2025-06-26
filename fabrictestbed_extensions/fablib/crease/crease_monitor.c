@@ -38,7 +38,6 @@
 #define CREASEPROT 254
 
 #define MAX_PORTS 3
-#define MAX_LCORES 8
 
 static uint64_t tsc_hz;
 
@@ -122,8 +121,8 @@ extract_long(uint8_t* ptr)
 #define IDX_REPLAY_RECORD (uint8_t)0
 #define IDX_REPLAY_CLEAR (uint8_t)1
 #define IDX_REPLAY_RUN (uint8_t)2
-uint8_t c_to_tx[MAX_LCORES];
-uint8_t tx_to_c[MAX_LCORES];
+uint8_t *c_to_tx;
+uint8_t *tx_to_c;
 uint16_t c_ctrs[8];
 uint64_t replay_start = 0;
 uint64_t replay_end = 0;
@@ -348,6 +347,7 @@ crinkle_command_handler(
 	const uint64_t systime_ns)
 {
 	uint8_t* cursor = rte_pktmbuf_mtod_offset(buf, uint8_t*, 12);
+	unsigned i;
 	if (*cursor != 0x86 || *(cursor + 1) != 0xDD) return;
 	cursor += 2 + 6;
 	if (*cursor != CREASEPROT) return;
@@ -364,7 +364,7 @@ crinkle_command_handler(
 		if (unlikely(c_ctrs[IDX_REPLAY_CLEAR] > 0)) return;
 		if (unlikely(c_ctrs[IDX_REPLAY_RUN] > 0)) return;
 		replay_end = 0;
-		for (unsigned i = 0; i < nb_lcores; ++i) {
+		for (i = 0; i < nb_lcores; ++i) {
 			if (unlikely(i == c_lcore)) continue;
 			c_to_tx[i] |= TYPE_REPLAY_CLEAR;
 		}
@@ -374,7 +374,7 @@ crinkle_command_handler(
 		if (unlikely(replay_end == 0 || systime_ns < replay_end)) return;
 		if (unlikely(c_ctrs[IDX_REPLAY_CLEAR] > 0)) return;
 		if (unlikely(c_ctrs[IDX_REPLAY_RUN] > 0)) return;
-		for (unsigned i = 0; i < nb_lcores; ++i) {
+		for (i = 0; i < nb_lcores; ++i) {
 			if (unlikely(i == c_lcore)) continue;
 			c_to_tx[i] |= TYPE_REPLAY_RUN;
 		}
@@ -392,7 +392,7 @@ static int
 lcore_main(__rte_unused void *dummy)
 {
 	struct rte_mbuf *bufs[BURST_SIZE];
-	unsigned lcore_id;
+	unsigned lcore_id, k;
 	int i, j, nb_rx;
 	uint16_t portid;
 	struct lcore_queue_conf *qconf;
@@ -418,15 +418,24 @@ lcore_main(__rte_unused void *dummy)
 
 	if (portid == vport_to_devport[0]) {
 		while (1) {
-			for (uint16_t i = 0; i < nb_lcores; ++i) {
-				if (unlikely(i == c_lcore)) continue;
-				if (tx_to_c[i] & TYPE_REPLAY_CLEAR) {
+			clock_gettime(CLOCK_REALTIME, &systime);
+			systime_ns = timespec64_to_ns(&systime);
+			portid = qconf->rx_queue_list[0];
+			nb_rx = rte_eth_rx_burst(portid, 0, bufs, BURST_SIZE);
+
+			for (i = 0; i < nb_rx; ++i) {
+				crinkle_command_handler(bufs[i], systime_ns);
+			}
+
+			for (k = 0; k < nb_lcores; ++k) {
+				if (unlikely(k == c_lcore)) continue;
+				if (tx_to_c[k] & TYPE_REPLAY_CLEAR) {
 					--c_ctrs[IDX_REPLAY_CLEAR];
-					tx_to_c[i] &= ~TYPE_REPLAY_CLEAR;
+					tx_to_c[k] &= ~TYPE_REPLAY_CLEAR;
 				}
-				if (tx_to_c[i] & TYPE_REPLAY_RUN) {
+				if (tx_to_c[k] & TYPE_REPLAY_RUN) {
 					--c_ctrs[IDX_REPLAY_RUN];
-					tx_to_c[i] &= ~TYPE_REPLAY_RUN;
+					tx_to_c[k] &= ~TYPE_REPLAY_RUN;
 				}
 			}
 		}
@@ -438,20 +447,19 @@ lcore_main(__rte_unused void *dummy)
 			for (i = 0; i < qconf->n_rx_queue; ++i) {
 				portid = qconf->rx_queue_list[i];
 				nb_rx = rte_eth_rx_burst(portid, 0, bufs, BURST_SIZE);
-
 				
-				for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; j++) {
+				for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; ++j) {
 					rte_prefetch0(rte_pktmbuf_mtod(bufs[j], void *));
 				}
 
-				for (j = 0; j < (nb_rx - PREFETCH_OFFSET); j++) {
+				for (j = 0; j < (nb_rx - PREFETCH_OFFSET); ++j) {
 					rte_prefetch0(rte_pktmbuf_mtod(bufs[j + PREFETCH_OFFSET], void *));
 					crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
 									replay_start, replay_end);
 				}
 
 				/* Forward remaining prefetched packets */
-				for (; j < nb_rx; j++) {
+				for (; j < nb_rx; ++j) {
 					crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
 									replay_start, replay_end);
 				}
@@ -464,11 +472,11 @@ lcore_main(__rte_unused void *dummy)
 			}
 
 			if (c_to_tx[lcore_id] & TYPE_REPLAY_CLEAR) {
-				for (uint16_t i = 1; i < nb_ports; ++i) {
+				for (i = 1; i < nb_ports; ++i) {
 					if (qconf->buf_mbufs[i].len == 0) continue;
-					for (uint16_t j = 0; j < qconf->buf_mbufs[i].len; ++j) {
-						rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[j].m_table, qconf->buf_mbufs[i].m_lens[j]);
-						qconf->buf_mbufs[i].m_lens[j] = 0;
+					for (k = 0; k < qconf->buf_mbufs[i].len; ++k) {
+						rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[k].m_table, qconf->buf_mbufs[i].m_lens[k]);
+						qconf->buf_mbufs[i].m_lens[k] = 0;
 					}
 					qconf->buf_mbufs[i].len = 0;
 				}
@@ -630,6 +638,8 @@ main(int argc, char *argv[])
 		rte_exit(EXIT_FAILURE, "Cannot init clone mbuf pool\n");
 
 	nb_lcores = rte_lcore_count();
+	c_to_tx = rte_malloc("uint8_t", nb_lcores*sizeof(uint8_t), 0);
+	tx_to_c = rte_malloc("uint8_t", nb_lcores*sizeof(uint8_t), 0);
 	uint16_t portid;
 	uint32_t n_tx_queue;
 	unsigned lcore_id = 0, rx_lcore_id = 0;
