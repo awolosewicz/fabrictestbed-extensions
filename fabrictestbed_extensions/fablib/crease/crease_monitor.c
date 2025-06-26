@@ -571,7 +571,7 @@ main(int argc, char *argv[])
 				printf("  -v    Print version\n");
 				exit(EXIT_SUCCESS);
 			case 'v':
-				printf("Crease Monitor v0.3.1\n");
+				printf("Crease Monitor v0.3.2\n");
 				exit(EXIT_SUCCESS);
 			case '?':
 				switch (optopt) {
