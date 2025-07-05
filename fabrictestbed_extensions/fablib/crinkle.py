@@ -1039,6 +1039,7 @@ class CrinkleSlice(Slice):
                 refreshed_monitor = self.get_monitor(monitor.get_name())
                 mon_site = refreshed_monitor.get_site()
                 jobs.append(refreshed_monitor.execute_thread(f"sudo ip link set {self.analyzer_iface.get_device_name()} up; wget -q -O {REMOTEWORKDIR}/{DPDKNAME} {MONITORURL}; chmod u+x {REMOTEWORKDIR}/{DPDKNAME}"))
+                jobs.append(refreshed_monitor.execute_thread(f"sudo sed -i 's/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"default_hugepagesz=1G hugepagesz=1G hugepages={refreshed_monitor.get_ram()//2}\"/' /etc/default/grub && sudo grub-mkconfig -o /boot/grub/grub.cfg"))
                 if self.cnets[mon_site] is None or not self.cnets[mon_site].is_instantiated():
                     self.cnets[mon_site] = self.get_l3network(name=f"{self.prefix}_ananet_{mon_site}")
                 refreshed_monitor.data.cnet_iface = refreshed_monitor.get_interface(network_name=f"{self.prefix}_ananet_{mon_site}")
