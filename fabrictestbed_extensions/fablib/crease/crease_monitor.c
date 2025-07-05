@@ -105,14 +105,14 @@ struct __rte_cache_aligned pkt_metadata {
 static inline uint64_t
 extract_long(uint8_t* ptr)
 {
-	return (uint64_t)ptr[0] |
-		   ((uint64_t)ptr[1] << 8) |
-		   ((uint64_t)ptr[2] << 16) |
-		   ((uint64_t)ptr[3] << 24) |
-		   ((uint64_t)ptr[4] << 32) |
-		   ((uint64_t)ptr[5] << 40) |
-		   ((uint64_t)ptr[6] << 48) |
-		   ((uint64_t)ptr[7] << 56);
+	return ((uint64_t)ptr[0] << 56) |
+		   ((uint64_t)ptr[1] << 48) |
+		   ((uint64_t)ptr[2] << 40) |
+		   ((uint64_t)ptr[3] << 32) |
+		   ((uint64_t)ptr[4] << 24) |
+		   ((uint64_t)ptr[5] << 16) |
+		   ((uint64_t)ptr[6] << 8) |
+		   ((uint64_t)ptr[7]);
 }
 
 #define TYPE_REPLAY_RECORD (uint8_t)1
@@ -126,6 +126,7 @@ uint8_t *tx_to_c;
 uint16_t c_ctrs[8];
 uint64_t replay_start = 0;
 uint64_t replay_end = 0;
+uint64_t replay_run_start = 0;
 
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
@@ -198,6 +199,7 @@ send_burst_replayable(
 			return;
 		}
 		rte_memcpy(qconf->buf_mbufs[outport].m_tables[rep_len].m_table, m_table, len * sizeof(struct rte_mbuf*));
+		qconf->buf_mbufs[outport].m_lens[rep_len] = len;
 		qconf->buf_mbufs[outport].tsc_counts[rep_len] = rte_rdtsc_precise();
 		qconf->buf_mbufs[outport].len = ++rep_len;
 	}
@@ -322,24 +324,30 @@ run_replay(
 {
 	if (unlikely(qconf->buf_mbufs[port].len == 0)) return;
 	uint32_t ptr = 0;
+	uint32_t i;
 	int ret;
 
-	uint64_t tsc_delta = (start_time - replay_start) * tsc_hz / NSEC_PER_SEC;
+	uint64_t tsc_delta = ((start_time - replay_start) / NSEC_PER_SEC) * tsc_hz;
 	uint64_t tsc_start = qconf->buf_mbufs[port].tsc_counts[0] + tsc_delta;
 
-	while (qconf->buf_mbufs[port].len > 0 && ptr < qconf->buf_mbufs[port].len) {
+	while (ptr < qconf->buf_mbufs[port].len) {
 		if (tsc_start <= rte_rdtsc_precise()) {
 			ret = rte_eth_tx_burst(port, qconf->tx_queue_id[port],
 								   qconf->buf_mbufs[port].m_tables[ptr].m_table, qconf->buf_mbufs[port].m_lens[ptr]);
 			if (unlikely(ret < qconf->buf_mbufs[port].m_lens[ptr])) {
 				rte_pktmbuf_free_bulk(&qconf->buf_mbufs[port].m_tables[ptr].m_table[ret], qconf->buf_mbufs[port].m_lens[ptr] - ret);
 			}
-			qconf->buf_mbufs[port].m_lens[ptr] = 0;
 			++ptr;
 			tsc_start = qconf->buf_mbufs[port].tsc_counts[ptr] + tsc_delta;
 		}
 	}
-	qconf->buf_mbufs[port].len = 0;
+	ptr = 0;
+	while (ptr < qconf->buf_mbufs[port].len) {
+		for(i = 0; i < qconf->buf_mbufs[port].m_lens[ptr]; ++i) {
+			rte_pktmbuf_refcnt_update(qconf->buf_mbufs[port].m_tables[ptr].m_table[i], 1);
+		}
+		++ptr;
+	}
 }
 
 static inline void
@@ -357,7 +365,7 @@ crinkle_command_handler(
 	if (*cursor == TYPE_REPLAY_RECORD) {
 		replay_start = extract_long(++cursor);
 		cursor += 8;
-		replay_end = replay_start + extract_long(cursor);
+		replay_end = extract_long(cursor);
 	}
 	else if (*cursor == TYPE_REPLAY_CLEAR) {
 		// if c_ctrs is > 0, that means one or more worker threads have not finished
@@ -375,6 +383,7 @@ crinkle_command_handler(
 		if (unlikely(replay_end == 0 || systime_ns < replay_end)) return;
 		if (unlikely(c_ctrs[IDX_REPLAY_CLEAR] > 0)) return;
 		if (unlikely(c_ctrs[IDX_REPLAY_RUN] > 0)) return;
+		replay_run_start = extract_long(++cursor);
 		for (i = 0; i < nb_lcores; ++i) {
 			if (unlikely(i == c_lcore)) continue;
 			c_to_tx[i] |= TYPE_REPLAY_RUN;
@@ -484,12 +493,12 @@ lcore_main(__rte_unused void *dummy)
 					qconf->buf_mbufs[i].len = 0;
 				}
 				tx_to_c[lcore_id] |= TYPE_REPLAY_CLEAR;
-				c_to_tx[i] &= ~TYPE_REPLAY_CLEAR;
+				c_to_tx[lcore_id] &= ~TYPE_REPLAY_CLEAR;
 			}
 			else if (c_to_tx[lcore_id] & TYPE_REPLAY_RUN) {
-				run_replay(qconf, get_output_port_from_vport(devport_to_vport[portid]), replay_start);
+				run_replay(qconf, get_output_port_from_vport(devport_to_vport[portid]), replay_run_start);
 				tx_to_c[lcore_id] |= TYPE_REPLAY_RUN;
-				c_to_tx[i] &= ~TYPE_REPLAY_RUN;
+				c_to_tx[lcore_id] &= ~TYPE_REPLAY_RUN;
 			}
 		}
 	}
