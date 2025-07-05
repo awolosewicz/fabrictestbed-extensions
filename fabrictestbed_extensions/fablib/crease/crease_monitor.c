@@ -68,7 +68,6 @@ static uint16_t devport_to_vport[MAX_PORTS];
 struct mbuf_table {
 	uint16_t len;
 	struct rte_mbuf *m_table[BURST_SIZE];
-	struct rte_mbuf *t_table[BURST_SIZE];
 };
 
 struct mbuf_table_light {
@@ -174,19 +173,18 @@ send_burst_replayable(
 	const uint64_t copy_replay_start,
 	const uint64_t copy_replay_end)
 {
-	struct rte_mbuf **t_table, **m_table;
+	struct rte_mbuf **m_table;
 	uint32_t rep_len;
 	uint16_t len, queueid;
 	int ret;
 
 	queueid = qconf->tx_queue_id[outport];
 	m_table = (struct rte_mbuf **)qconf->tx_mbufs[outport].m_table;
-	t_table = (struct rte_mbuf **)qconf->tx_mbufs[outport].t_table;
 	len = qconf->tx_mbufs[outport].len;
 
-	ret = rte_eth_tx_burst(outport, queueid, t_table, len);
+	ret = rte_eth_tx_burst(outport, queueid, m_table, len);
 	while (unlikely (ret < len)) {
-		rte_pktmbuf_free(t_table[ret]);
+		rte_pktmbuf_free(m_table[ret]);
 		ret++;
 	}
 
@@ -255,19 +253,14 @@ crinkle_forward(
 	const uint64_t copy_replay_start,
 	const uint64_t copy_replay_end)
 {
-	uint16_t len;
-	uint16_t outport;
+	uint16_t len, outport, pkt_size;
 	struct pkt_metadata uid_trailer;
 	const uint32_t *candidate_trailer_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
 	uint32_t candidate_trailer = *candidate_trailer_ptr;
 	uint32_t ts_lower = *(candidate_trailer_ptr-2);
 	uint8_t *trailer = rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16);
 	uint8_t *c;
-	struct rte_mbuf *tbuf;
 	struct rte_mbuf *cbuf;
-	if (unlikely ((tbuf = rte_pktmbuf_clone(buf, tx_pool)) == NULL)) {
-		return;
-	}
 	if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
 		return;
 	}
@@ -286,9 +279,7 @@ crinkle_forward(
 		rte_mov16(trailer, (uint8_t *)(&uid_trailer));
 	}
 
-	uint16_t pkt_size = rte_cpu_to_be_16(buf->data_len);
-	tbuf->data_len = buf->data_len;
-	tbuf->pkt_len = buf->pkt_len;
+	pkt_size = rte_cpu_to_be_16(buf->data_len);
 	if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
 		printf("Failed to append clone packet");
 		rte_pktmbuf_free(cbuf);
@@ -303,8 +294,8 @@ crinkle_forward(
 	
 	len = qconf->tx_mbufs[outport].len;
 	qconf->tx_mbufs[outport].m_table[len] = buf;
-	qconf->tx_mbufs[outport].t_table[len] = tbuf;
 	qconf->tx_mbufs[outport].len = ++len;
+	rte_pktmbuf_refcnt_update(buf, 1);
 	if (unlikely(BURST_SIZE == len))
 		send_burst_replayable(qconf, outport, systime_ns, copy_replay_start, copy_replay_end);
 	
