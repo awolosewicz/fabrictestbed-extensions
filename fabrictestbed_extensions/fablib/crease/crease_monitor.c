@@ -18,9 +18,8 @@
 #include <rte_malloc.h>
 
 #define NUM_MBUFS 8192
-#define MBUF_CACHE_SIZE 64
+#define MBUF_CACHE_SIZE 128
 #define BURST_SIZE 64
-#define MAX_REPLAY_BURSTS 8192
 #define MIN_REPLAY_SIZE 128
 #define BURST_TX_DRAIN_US 10 /* TX drain every ~10us */
 /* Configure how many packets ahead to prefetch, when reading packets */
@@ -36,6 +35,7 @@
 
 #define MONPROT 0x6587
 #define CREASEPROT 254
+#define CREASEVER "Crease Monitor v0.4.0\n"
 
 #define MAX_PORTS 3
 
@@ -52,12 +52,12 @@ const uint16_t ana_size = 88;
 uint64_t mon_id;
 uint16_t nb_ports;
 unsigned nb_lcores, c_lcore, max_replay_size;
-static struct rte_mempool *packet_pool, *tx_pool, *clone_pool;
+static struct rte_mempool *packet_pool, *clone_pool;
 
 static int rx_queue_per_lcore = 1;
 
-#define RX_RING_SIZE 512
-#define TX_RING_SIZE 2048
+#define RX_RING_SIZE 1024
+#define TX_RING_SIZE 4096
 static uint16_t nb_rxd = RX_RING_SIZE;
 static uint16_t nb_txd = TX_RING_SIZE;
 static struct rte_ether_addr ports_eth_addr[MAX_PORTS];
@@ -183,15 +183,15 @@ send_burst_replayable(
 	len = qconf->tx_mbufs[outport].len;
 
 	ret = rte_eth_tx_burst(outport, queueid, m_table, len);
-	while (unlikely (ret < len)) {
-		rte_pktmbuf_free(m_table[ret]);
-		ret++;
+	if (unlikely(ret < len)) {
+		rte_pktmbuf_free_bulk(&m_table[ret], len - ret);
+		//printf("Failed to send all packets, sent %d, total %d\n", ret, len);
 	}
 
 	if (unlikely(systime_ns <= copy_replay_end && systime_ns >= copy_replay_start)) {
 		rep_len = qconf->buf_mbufs[outport].len;
 		if (unlikely(rep_len >= max_replay_size)) {
-			printf("Replay buffer overflow, not storing packets\n");
+			//printf("Replay buffer overflow, rep_len %u, not storing packets\n", rep_len);
 			rte_pktmbuf_free_bulk(m_table, len);
 			qconf->tx_mbufs[outport].len = 0;
 			return;
@@ -202,6 +202,8 @@ send_burst_replayable(
 		qconf->buf_mbufs[outport].len = ++rep_len;
 	}
 	else {
+		// Double free since the refcnt will be at +2
+		rte_pktmbuf_free_bulk(m_table, len);
 		rte_pktmbuf_free_bulk(m_table, len);
 	}
 
@@ -259,11 +261,11 @@ crinkle_forward(
 	uint32_t candidate_trailer = *candidate_trailer_ptr;
 	uint32_t ts_lower = *(candidate_trailer_ptr-2);
 	uint8_t *trailer = rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16);
-	uint8_t *c;
-	struct rte_mbuf *cbuf;
-	if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
-		return;
-	}
+	// uint8_t *c;
+	// struct rte_mbuf *cbuf;
+	// if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
+	// 	return;
+	// }
 
 	// Build trailer
 	uid_trailer.systime_ns = rte_cpu_to_be_64(systime_ns);
@@ -273,37 +275,37 @@ crinkle_forward(
 	if ((candidate_trailer & 0x0000FFFF) != MONPROT || (candidate_trailer >> 16) != (ts_lower & 0x0000FFFF)) {
 		if (unlikely((trailer = (uint8_t *)rte_pktmbuf_append(buf, 16)) == NULL)) {
 			printf("Failed to append trailer to packet");
-			rte_pktmbuf_free(cbuf);
+			// rte_pktmbuf_free(cbuf);
 			return;
 		}
 		rte_mov16(trailer, (uint8_t *)(&uid_trailer));
 	}
 
-	pkt_size = rte_cpu_to_be_16(buf->data_len);
-	if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
-		printf("Failed to append clone packet");
-		rte_pktmbuf_free(cbuf);
-		return;
-	}
-	rte_mov64(c, ana_headers);
-	rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
-	rte_mov16(c+56, (uint8_t *)(&uid_trailer));
-	rte_mov16(c+72, trailer);
+	// pkt_size = rte_cpu_to_be_16(buf->data_len);
+	// if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
+	// 	printf("Failed to append clone packet");
+	// 	rte_pktmbuf_free(cbuf);
+	// 	return;
+	// }
+	// rte_mov64(c, ana_headers);
+	// rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
+	// rte_mov16(c+56, (uint8_t *)(&uid_trailer));
+	// rte_mov16(c+72, trailer);
 	
 	outport = get_output_port_from_vport(port);
 	
 	len = qconf->tx_mbufs[outport].len;
 	qconf->tx_mbufs[outport].m_table[len] = buf;
 	qconf->tx_mbufs[outport].len = ++len;
-	rte_pktmbuf_refcnt_update(buf, 1);
+	rte_pktmbuf_refcnt_update(buf, 2);
 	if (unlikely(BURST_SIZE == len))
 		send_burst_replayable(qconf, outport, systime_ns, copy_replay_start, copy_replay_end);
 	
-	len = qconf->tx_mbufs[vport_to_devport[0]].len;
-	qconf->tx_mbufs[vport_to_devport[0]].m_table[len] = cbuf;
-	qconf->tx_mbufs[vport_to_devport[0]].len = ++len;
-	if (unlikely(BURST_SIZE == len))
-	 	send_burst(qconf, vport_to_devport[0]);
+	// len = qconf->tx_mbufs[vport_to_devport[0]].len;
+	// qconf->tx_mbufs[vport_to_devport[0]].m_table[len] = cbuf;
+	// qconf->tx_mbufs[vport_to_devport[0]].len = ++len;
+	// if (unlikely(BURST_SIZE == len))
+	//  	send_burst(qconf, vport_to_devport[0]);
 }
 
 static inline void
@@ -320,19 +322,23 @@ run_replay(
 
 	uint64_t tsc_delta = ((start_time - replay_start) / NSEC_PER_SEC) * tsc_hz;
 	uint64_t tsc_start = qconf->buf_mbufs[port].tsc_counts[0] + tsc_delta;
+	uint64_t curr_tsc;
 
 	while (ptr < qconf->buf_mbufs[port].len) {
-		if (tsc_start <= rte_rdtsc_precise()) {
+		curr_tsc = rte_rdtsc_precise();
+		if (tsc_start <= curr_tsc) {
 			ret = rte_eth_tx_burst(port, qconf->tx_queue_id[port],
 								   qconf->buf_mbufs[port].m_tables[ptr].m_table, qconf->buf_mbufs[port].m_lens[ptr]);
 			if (unlikely(ret < qconf->buf_mbufs[port].m_lens[ptr])) {
 				rte_pktmbuf_free_bulk(&qconf->buf_mbufs[port].m_tables[ptr].m_table[ret], qconf->buf_mbufs[port].m_lens[ptr] - ret);
+				//printf("Failed to send all packets, sent %d, total %d\n", ret, qconf->buf_mbufs[port].m_lens[ptr]);
 			}
 			++ptr;
-			tsc_start = qconf->buf_mbufs[port].tsc_counts[ptr] + tsc_delta;
+			tsc_start += qconf->buf_mbufs[port].tsc_counts[ptr] - qconf->buf_mbufs[port].tsc_counts[ptr-1];
 		}
 	}
 	ptr = 0;
+	// Does the refcnt update second so that replay can happen immediately
 	while (ptr < qconf->buf_mbufs[port].len) {
 		for(i = 0; i < qconf->buf_mbufs[port].m_lens[ptr]; ++i) {
 			rte_pktmbuf_refcnt_update(qconf->buf_mbufs[port].m_tables[ptr].m_table[i], 1);
@@ -354,11 +360,14 @@ crinkle_command_handler(
 	cursor += 2 + 32;
 
 	if (*cursor == TYPE_REPLAY_RECORD) {
+		printf("Replay record command received\n");
 		replay_start = extract_long(++cursor);
 		cursor += 8;
 		replay_end = extract_long(cursor);
+		printf("Replay record start: %lu, end: %lu\n", replay_start, replay_end);
 	}
 	else if (*cursor == TYPE_REPLAY_CLEAR) {
+		printf("Replay clear command received\n");
 		// if c_ctrs is > 0, that means one or more worker threads have not finished
 		// handling the last command
 		if (unlikely(c_ctrs[IDX_REPLAY_CLEAR] > 0)) return;
@@ -369,8 +378,10 @@ crinkle_command_handler(
 			c_to_tx[i] |= TYPE_REPLAY_CLEAR;
 		}
 		c_ctrs[IDX_REPLAY_CLEAR] = nb_lcores - 1;
+		printf("Clearing replay buffers\n");
 	}
 	else if (*cursor == TYPE_REPLAY_RUN) {
+		printf("Replay run command received\n");
 		if (unlikely(replay_end == 0 || systime_ns < replay_end)) return;
 		if (unlikely(c_ctrs[IDX_REPLAY_CLEAR] > 0)) return;
 		if (unlikely(c_ctrs[IDX_REPLAY_RUN] > 0)) return;
@@ -380,6 +391,7 @@ crinkle_command_handler(
 			c_to_tx[i] |= TYPE_REPLAY_RUN;
 		}
 		c_ctrs[IDX_REPLAY_RUN] = nb_lcores - 1;
+		printf("Replay run start: %lu\n", replay_run_start);
 	}
 }
 
@@ -475,9 +487,11 @@ lcore_main(__rte_unused void *dummy)
 			}
 
 			if (c_to_tx[lcore_id] & TYPE_REPLAY_CLEAR) {
-				for (i = 1; i < nb_ports; ++i) {
+				for (i = 0; i < nb_ports; ++i) {
 					if (qconf->buf_mbufs[i].len == 0) continue;
 					for (k = 0; k < qconf->buf_mbufs[i].len; ++k) {
+						// double free since the refcnt will be at +2
+						rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[k].m_table, qconf->buf_mbufs[i].m_lens[k]);
 						rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[k].m_table, qconf->buf_mbufs[i].m_lens[k]);
 						qconf->buf_mbufs[i].m_lens[k] = 0;
 					}
@@ -586,11 +600,12 @@ main(int argc, char *argv[])
 				printf("  -d    Set virtual-actual device mappings, as [virtual]@[actual], actual as parsed by dpdk\n");
 				printf("  -m    Set MAC addresses for analyzer (source then dest)\n");
 				printf("  -i    Set IP addresses for analyzer (source then dest)\n");
+				printf("  -r    Set maximum replay size, default %u\n", MIN_REPLAY_SIZE);
 				printf("  -h    Print this help\n");
 				printf("  -v    Print version\n");
 				exit(EXIT_SUCCESS);
 			case 'v':
-				printf("Crease Monitor v0.3.2\n");
+				printf(CREASEVER);
 				exit(EXIT_SUCCESS);
 			case '?':
 				switch (optopt) {
@@ -622,17 +637,19 @@ main(int argc, char *argv[])
 	}
 	if (max_replay_size < MIN_REPLAY_SIZE) max_replay_size = MIN_REPLAY_SIZE;
 
-	packet_pool = rte_pktmbuf_pool_create("packet_pool", max_replay_size*BURST_SIZE, MBUF_CACHE_SIZE,
+	printf(CREASEVER);
+	printf("Monitor ID: %lu\n", mon_id);
+	printf("Virtual port to device port mapping:\n");
+	for (uint16_t i = 0; i < nb_ports; ++i) {
+		printf("  Virtual port %hu -> Device port %hu\n", i, vport_to_devport[i]);
+	}
+	printf("Maximum replay size: %u\n", max_replay_size);
+
+	packet_pool = rte_pktmbuf_pool_create("packet_pool", (max_replay_size+256)*BURST_SIZE, MBUF_CACHE_SIZE,
 		0, PKT_MBUF_DATA_SIZE, rte_socket_id());
 
 	if (packet_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init packet mbuf pool\n");
-
-	tx_pool = rte_pktmbuf_pool_create("tx_pool", NUM_MBUFS, MBUF_CACHE_SIZE,
-		0, 0, rte_socket_id());
-
-	if (tx_pool == NULL)
-		rte_exit(EXIT_FAILURE, "Cannot init transmit mbuf pool\n");
 
 	clone_pool = rte_pktmbuf_pool_create("clone_pool", NUM_MBUFS , MBUF_CACHE_SIZE,
 		0, 0, rte_socket_id());
@@ -739,7 +756,7 @@ main(int argc, char *argv[])
 			fflush(stdout);
 
 			txconf = &dev_info.default_txconf;
-			printf("txconf offloads: 0x%" PRIx64 "\n", txconf->offloads);
+			//printf("txconf offloads: 0x%" PRIx64 "\n", txconf->offloads);
 			ret = rte_eth_tx_queue_setup(portid, queueid, nb_txd,
 						     rte_lcore_to_socket_id(lcore_id), txconf);
 			if (ret < 0)
