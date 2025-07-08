@@ -9,7 +9,7 @@ import time
 import random
 from IPython.core.display_functions import display
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from fabric_cf.orchestrator.swagger_client import (
@@ -1023,7 +1023,92 @@ class CrinkleSlice(Slice):
         Only use this method after a non-blocking submit call and only call it
         once.
         """
-        super().post_boot_config()
+        # Rewritten super to handle Crinkle-specific nodes
+        if self.is_dead_or_closing() or self.is_allocated():
+            print(
+                f"FAILURE: Slice is in {self.get_state()} state; cannot do post boot config"
+            )
+            return
+        
+
+        logging.info(
+            f"post_boot_config: slice_name: {self.get_name()}, slice_id {self.get_slice_id()}"
+        )
+
+        # Make sure we have the latest topology
+        self.update()
+
+        for network in self.get_networks():
+            network.config()
+
+        for interface in self.get_all_interfaces():
+            try:
+                interface.config_vlan_iface()
+            except Exception as e:
+                logging.error(f"Interface: {interface.get_name()} failed to config")
+                logging.error(e, exc_info=True)
+
+        for interface in self.get_all_interfaces():
+            try:
+                interface.get_node().execute(
+                    f"sudo nmcli device set {interface.get_device_name()} managed no",
+                    quiet=True,
+                )
+            except Exception as e:
+                logging.error(
+                    f"Interface: {interface.get_name()} failed to become unmanaged"
+                )
+                logging.error(e, exc_info=True)
+
+        import time
+
+        start = time.time()
+
+        my_thread_pool_executor = futures.ThreadPoolExecutor(32)
+        threads = {}
+
+        for node in self.get_all_nodes():
+            # Run configuration on newly created nodes and on modify.
+            logging.info(
+                f"Configuring {node.get_name()} "
+                f"(instantiated: {node.is_instantiated()}, "
+                f"modify: {self._is_modify()})"
+            )
+            if not node.is_instantiated() or self._is_modify():
+                thread = my_thread_pool_executor.submit(node.config)
+                threads[thread] = node
+
+        print("Running post boot config threads ...")
+
+        for thread in futures.as_completed(threads.keys()):
+            node = threads[thread]
+            try:
+                result = thread.result()
+                print(
+                    f"Post boot config {node.get_name()}, Done! ({time.time() - start:.0f} sec)"
+                )
+            except Exception as e:
+                print(
+                    f"Post boot config {node.get_name()}, Failed! ({time.time() - start:.0f} sec)"
+                )
+                logging.error(
+                    f"Post boot config {node.get_name()}, Failed! ({time.time() - start:.0f} sec) {e}"
+                )
+
+        # Push updates to user_data
+        print("Saving fablib data... ", end="")
+        self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
+        self.update()
+
+        for node in self.get_nodes():
+            if "attestable_switch_config" in node.get_user_data():
+                logging.info(
+                    f"switch config: {str(node.get_user_data()['attestable_switch_config'])}"
+                )
+                aswitch = self.get_attestable_switch(name=node.get_name())
+                aswitch.switch_config()
+
+        # Custom Crinkle logic
         logging.info(f"Crinkle post_boot_config")
         if self.do_post_boot:
             self.analyzer = self.get_node(name=self.analyzer_name)
@@ -1175,7 +1260,8 @@ class CrinkleSlice(Slice):
         return ret_val
     
     def get_interfaces(
-        self, include_subs: bool = True, refresh: bool = False, output: str = "list"):
+        self, include_subs: bool = True, refresh: bool = False, output: str = "list"
+        ) -> Union[dict[str, Interface], list[Interface]]:
         """
         Gets all non-Crinkle interfaces in this slice.
 
@@ -1194,7 +1280,8 @@ class CrinkleSlice(Slice):
         return super().get_interfaces(include_subs=include_subs, refresh=refresh, output=output)
     
     def get_all_interfaces(
-        self, include_subs: bool = True, refresh: bool = False, output: str = "list"):
+        self, include_subs: bool = True, refresh: bool = False, output: str = "list"
+        ) -> Union[dict[str, Interface], list[Interface]]:
         """
         Gets all interfaces in this slice.
 
