@@ -151,19 +151,7 @@ class Component:
         :return: slice attributes as dictionary
         :rtype: dict
         """
-        return {
-            "name": str(self.get_name()),
-            "short_name": str(self.get_short_name()),
-            "details": str(self.get_details()),
-            "disk": str(self.get_disk()),
-            "units": str(self.get_unit()),
-            "pci_address": str(self.get_pci_addr()),
-            "model": str(self.get_model()),
-            "type": str(self.get_type()),
-            "dev": str(self.get_device_name()),
-            "node": str(self.get_node().get_name()),
-            "numa": str(self.get_numa_node()),
-        }
+        return self.dict
 
     def generate_template_context(self):
         context = self.toDict()
@@ -348,8 +336,24 @@ class Component:
         """
         super().__init__()
         self.fim_component = fim_component
+        self.fim_model = None
         self.node = node
         self.interfaces = {}
+
+        self.dict = {
+            "name": "",
+            "short_name": "",
+            "details": "",
+            "disk": "",
+            "units": "",
+            "pci_address": "",
+            "model": "",
+            "type": "",
+            "dev": "",
+            "node": node.get_name(),
+            "numa": "",
+        }
+
 
     def get_interfaces(
         self, include_subs: bool = True, refresh: bool = False, output: str = "list"
@@ -432,7 +436,9 @@ class Component:
         Gets the short name of the component.
         """
         # strip of the extra parts of the name added by fim
-        return self.get_name()[len(f"{self.get_node().get_name()}-") :]
+        if not self.dict["short_name"]:
+            self.dict["short_name"] = self.get_name()[len(f"{self.get_node().get_name()}-") :]
+        return self.dict["short_name"]
 
     def get_name(self) -> str:
         """
@@ -441,28 +447,35 @@ class Component:
         :return: the name of this component
         :rtype: str
         """
-        return self.get_fim_component().name
+        if not self.dict["name"]:
+            self.dict["name"] = self.get_fim_component().name
+        return self.dict["name"]
 
     def get_details(self) -> str:
         """
         Not intended for API use
         """
-        return self.get_fim_component().details
+        if not self.dict["details"]:
+            self.dict["details"] = self.get_fim_component().details
+        return self.dict["details"]
 
     def get_numa_node(self) -> str:
         """
         Get the Numa Node assigned to the device
         """
-        try:
-            numa = self.get_fim_component().get_property(pname="label_allocations").numa
-            if numa is not None:
-                if isinstance(numa, str):
-                    return numa
-                if isinstance(numa, list):
-                    return numa[0]
-        except Exception as e:
-            logging.error(f"get_numa_node failed: {e}")
-            return None
+        if not self.dict["numa"]:
+            try:
+                numa = self.get_fim_component().get_property(pname="label_allocations").numa
+                if numa is not None:
+                    if isinstance(numa, str):
+                        return numa
+                    if isinstance(numa, list):
+                        return numa[0]
+            except Exception as e:
+                logging.error(f"get_numa_node failed: {e}")
+                return None
+            self.dict["numa"] = numa
+        return self.dict["numa"]
 
     def get_disk(self) -> int:
         """
@@ -471,7 +484,9 @@ class Component:
         :return: this component's disk space
         :rtype: int
         """
-        return self.get_fim_component().get_property(pname="capacity_allocations").disk
+        if not self.dict["disk"]:
+            self.dict["disk"] = self.get_fim_component().get_property(pname="capacity_allocations").disk
+        return self.dict["disk"]
 
     def get_unit(self) -> int:
         """
@@ -480,7 +495,9 @@ class Component:
         :return: unit
         :rtype: int
         """
-        return self.get_fim_component().get_property(pname="capacity_allocations").unit
+        if not self.dict["units"]:
+            self.dict["units"] = self.get_fim_component().get_property(pname="capacity_allocations").unit
+        return self.dict["units"]
 
     def get_pci_addr(self) -> str:
         """
@@ -489,7 +506,9 @@ class Component:
         :return: PCI device ID
         :rtype: String
         """
-        return self.get_fim_component().get_property(pname="label_allocations").bdf
+        if not self.dict["pci_address"]:
+            self.dict["pci_address"] = self.get_fim_component().get_property(pname="label_allocations").bdf
+        return self.dict["pci_address"]
 
     def get_model(self) -> str:
         """
@@ -499,32 +518,31 @@ class Component:
         :rtype: String
         """
         # TODO: This a hack that need a real fix
-        if (
-            str(self.get_type()) == "SmartNIC"
-            and str(self.get_fim_model()) == "ConnectX-6"
-        ):
-            return Constants.CMP_NIC_ConnectX_6
-        if (
-            str(self.get_type()) == "SmartNIC"
-            and str(self.get_fim_model()) == "BlueField-2-ConnectX-6"
-        ):
-            return Constants.CMP_NIC_BlueField2_ConnectX_6
-        elif (
-            str(self.get_type()) == "SmartNIC"
-            and str(self.get_fim_model()) == "ConnectX-5"
-        ):
-            return Constants.CMP_NIC_ConnectX_5
-        elif str(self.get_type()) == "NVME" and str(self.get_fim_model()) == "P4510":
-            return Constants.CMP_NVME_P4510
-        elif str(self.get_type()) == "GPU" and str(self.get_fim_model()) == "Tesla T4":
-            return Constants.CMP_GPU_TeslaT4
-        elif str(self.get_type()) == "GPU" and str(self.get_fim_model()) == "RTX6000":
-            return Constants.CMP_GPU_RTX6000
-        elif (
-            str(self.get_type()) == "SharedNIC"
-            and str(self.get_fim_model()) == "ConnectX-6"
-        ):
-            return Constants.CMP_NIC_Basic
+        str_type = ""
+        if not self.dict["type"]:
+            str_type = self.get_type()
+        else:
+            str_type = self.dict["type"]
+        str_fim = str(self.get_fim_model())
+        
+        if str_type == "SharedNIC":
+            if str_fim == "ConnectX-6":
+                return Constants.CMP_NIC_Basic
+        elif str_type == "SmartNIC":
+            if str_fim == "ConnectX-6":
+                return Constants.CMP_NIC_ConnectX_6
+            elif str_fim == "BlueField-2-ConnectX-6":
+                return Constants.CMP_NIC_BlueField2_ConnectX_6
+            elif str_fim == "ConnectX-5":
+                return Constants.CMP_NIC_ConnectX_5
+        elif str_type == "NVME":
+            if str_fim == "P4510":
+                return Constants.CMP_NVME_P4510
+        elif str_type == "GPU":
+            if str_fim == "Tesla T4":
+                return Constants.CMP_GPU_TeslaT4
+            elif str_fim == "RTX6000":
+                return Constants.CMP_GPU_RTX6000
 
     def get_reservation_id(self) -> str or None:
         """
@@ -580,7 +598,9 @@ class Component:
         """
         Not for API use
         """
-        return self.get_fim_component().model
+        if not self.fim_model:
+            self.fim_model = self.get_fim_component().model
+        return self.fim_model
 
     def get_type(self) -> str:
         """
@@ -591,7 +611,9 @@ class Component:
         :return: the type of component
         :rtype: str
         """
-        return self.get_fim_component().type
+        if not self.dict["type"]:
+            self.dict["type"] = self.get_fim_component().type
+        return self.dict["type"]
 
     def configure(self, commands: List[str] = []):
         """
@@ -688,8 +710,9 @@ class Component:
         """
         Not for API use
         """
-        labels = self.get_fim_component().get_property(pname="label_allocations")
-        return labels.device_name
+        if not self.dict["dev"]:
+            self.dict["dev"] = self.get_fim_component().get_property(pname="label_allocations").device_name
+        return self.dict["dev"]
 
     @staticmethod
     def new_storage(node: Node, name: str, auto_mount: bool = False):
