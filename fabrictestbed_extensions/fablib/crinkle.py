@@ -34,8 +34,8 @@ PCAPDIR = "/home/ubuntu/pcaps/"
 LOCALP4DIR = "."
 REMOTEWORKDIR = ".crease"
 CREASEDIR = "fabrictestbed-extensions/fabrictestbed_extensions/fablib/crease"
-MONITORURL = "https://transparnet.cs.iit.edu/~awolosewicz/dpdk-crease_monitor"
-DPDKNAME = "dpdk-crease_monitor"
+MONITORURL = "https://transparnet.cs.iit.edu/~awolosewicz/dpdk-crease_monitor-dev"
+DPDKNAME = "dpdk-crease_monitor-dev"
 MONPROT = 0x6587
 
 UBUNTU_IMAGES = ["default_ubuntu_20",
