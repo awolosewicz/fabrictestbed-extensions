@@ -21,7 +21,7 @@
 #define MBUF_CACHE_SIZE 128
 #define BURST_SIZE 64
 #define MIN_REPLAY_SIZE 128
-#define BURST_TX_DRAIN_US 10 /* TX drain every ~10us */
+#define BURST_TX_DRAIN_US 1 /* TX drain every ~1us */
 /* Configure how many packets ahead to prefetch, when reading packets */
 #define PREFETCH_OFFSET	3
 
@@ -231,7 +231,7 @@ send_timeout_burst(struct lcore_queue_conf *qconf, const uint64_t systime_ns)
 /* Get the output devport of input vport */
 static inline uint16_t
 get_output_port_from_vport(uint16_t input_port) {
-	if (input_port == 1) return vport_to_devport[0];
+	if (input_port == 1) return vport_to_devport[2];
 	return vport_to_devport[1];
 }
 
@@ -261,11 +261,11 @@ crinkle_forward(
 	uint32_t candidate_trailer = *candidate_trailer_ptr;
 	uint32_t ts_lower = *(candidate_trailer_ptr-2);
 	uint8_t *trailer = rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16);
-	// uint8_t *c;
-	// struct rte_mbuf *cbuf;
-	// if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
-	// 	return;
-	// }
+	uint8_t *c;
+	struct rte_mbuf *cbuf;
+	if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
+		return;
+	}
 
 	// Build trailer
 	uid_trailer.systime_ns = rte_cpu_to_be_64(systime_ns);
@@ -275,22 +275,22 @@ crinkle_forward(
 	if ((candidate_trailer & 0x0000FFFF) != MONPROT || (candidate_trailer >> 16) != (ts_lower & 0x0000FFFF)) {
 		if (unlikely((trailer = (uint8_t *)rte_pktmbuf_append(buf, 16)) == NULL)) {
 			printf("Failed to append trailer to packet");
-			// rte_pktmbuf_free(cbuf);
+			rte_pktmbuf_free(cbuf);
 			return;
 		}
 		rte_mov16(trailer, (uint8_t *)(&uid_trailer));
 	}
 
-	// pkt_size = rte_cpu_to_be_16(buf->data_len);
-	// if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
-	// 	printf("Failed to append clone packet");
-	// 	rte_pktmbuf_free(cbuf);
-	// 	return;
-	// }
-	// rte_mov64(c, ana_headers);
-	// rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
-	// rte_mov16(c+56, (uint8_t *)(&uid_trailer));
-	// rte_mov16(c+72, trailer);
+	pkt_size = rte_cpu_to_be_16(buf->data_len);
+	if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
+		printf("Failed to append clone packet");
+		rte_pktmbuf_free(cbuf);
+		return;
+	}
+	rte_mov64(c, ana_headers);
+	rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
+	rte_mov16(c+56, (uint8_t *)(&uid_trailer));
+	rte_mov16(c+72, trailer);
 	
 	outport = get_output_port_from_vport(port);
 	
@@ -301,11 +301,11 @@ crinkle_forward(
 	if (unlikely(BURST_SIZE == len))
 		send_burst_replayable(qconf, outport, systime_ns, copy_replay_start, copy_replay_end);
 	
-	// len = qconf->tx_mbufs[vport_to_devport[0]].len;
-	// qconf->tx_mbufs[vport_to_devport[0]].m_table[len] = cbuf;
-	// qconf->tx_mbufs[vport_to_devport[0]].len = ++len;
-	// if (unlikely(BURST_SIZE == len))
-	//  	send_burst(qconf, vport_to_devport[0]);
+	len = qconf->tx_mbufs[vport_to_devport[0]].len;
+	qconf->tx_mbufs[vport_to_devport[0]].m_table[len] = cbuf;
+	qconf->tx_mbufs[vport_to_devport[0]].len = ++len;
+	if (unlikely(BURST_SIZE == len))
+	 	send_burst(qconf, vport_to_devport[0]);
 }
 
 static inline void
@@ -375,7 +375,7 @@ crinkle_command_handler(
 		if (unlikely(c_ctrs[IDX_REPLAY_RUN] > 0)) return;
 		replay_end = 0;
 		for (i = 0; i < nb_lcores; ++i) {
-			//if (unlikely(i == c_lcore)) continue;
+			if (unlikely(i == c_lcore)) continue;
 			c_to_tx[i] |= TYPE_REPLAY_CLEAR;
 		}
 		c_ctrs[IDX_REPLAY_CLEAR] = nb_lcores;
@@ -388,7 +388,7 @@ crinkle_command_handler(
 		if (unlikely(c_ctrs[IDX_REPLAY_RUN] > 0)) return;
 		replay_run_start = extract_long(++cursor);
 		for (i = 0; i < nb_lcores; ++i) {
-			//if (unlikely(i == c_lcore)) continue;
+			if (unlikely(i == c_lcore)) continue;
 			c_to_tx[i] |= TYPE_REPLAY_RUN;
 		}
 		c_ctrs[IDX_REPLAY_RUN] = nb_lcores;
@@ -430,6 +430,8 @@ lcore_main(__rte_unused void *dummy)
 		printf(" -- lcoreid=%u portid=%d\n", lcore_id, portid);
 	}
 
+	uint32_t ctr_max = 10000000;
+
 	while (1) {
 		clock_gettime(CLOCK_REALTIME, &systime);
 		systime_ns = timespec64_to_ns(&systime);
@@ -443,7 +445,7 @@ lcore_main(__rte_unused void *dummy)
 			}
 
 			for (k = 0; k < nb_lcores; ++k) {
-				//if (unlikely(k == c_lcore)) continue;
+				if (unlikely(k == c_lcore)) continue;
 				if (tx_to_c[k] & TYPE_REPLAY_CLEAR) {
 					--c_ctrs[IDX_REPLAY_CLEAR];
 					tx_to_c[k] &= ~TYPE_REPLAY_CLEAR;
@@ -456,48 +458,48 @@ lcore_main(__rte_unused void *dummy)
 		}
 		else {
 			nb_rx = rte_eth_rx_burst(portid, 0, bufs, BURST_SIZE);
-		}
-		
-		for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; ++j) {
-			rte_prefetch0(rte_pktmbuf_mtod(bufs[j], void *));
-		}
-
-		for (j = 0; j < (nb_rx - PREFETCH_OFFSET); ++j) {
-			rte_prefetch0(rte_pktmbuf_mtod(bufs[j + PREFETCH_OFFSET], void *));
-			crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
-							replay_start, replay_end);
-		}
-
-		/* Forward remaining prefetched packets */
-		for (; j < nb_rx; ++j) {
-			crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
-							replay_start, replay_end);
-		}
-
-		/* Send out packets from TX queues */
-		if (unlikely(systime_ns - last_burst_ns >= BURST_TX_DRAIN_US*1000)) {
-			send_timeout_burst(qconf, systime_ns);
-			last_burst_ns = systime_ns;
-		}
-
-		if (c_to_tx[lcore_id] & TYPE_REPLAY_CLEAR) {
-			for (i = 0; i < nb_ports; ++i) {
-				if (qconf->buf_mbufs[i].len == 0) continue;
-				for (k = 0; k < qconf->buf_mbufs[i].len; ++k) {
-					// double free since the refcnt will be at +2
-					rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[k].m_table, qconf->buf_mbufs[i].m_lens[k]);
-					rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[k].m_table, qconf->buf_mbufs[i].m_lens[k]);
-					qconf->buf_mbufs[i].m_lens[k] = 0;
-				}
-				qconf->buf_mbufs[i].len = 0;
+			
+			for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; ++j) {
+				rte_prefetch0(rte_pktmbuf_mtod(bufs[j], void *));
 			}
-			tx_to_c[lcore_id] |= TYPE_REPLAY_CLEAR;
-			c_to_tx[lcore_id] &= ~TYPE_REPLAY_CLEAR;
-		}
-		else if (c_to_tx[lcore_id] & TYPE_REPLAY_RUN) {
-			run_replay(qconf, get_output_port_from_vport(devport_to_vport[portid]), replay_run_start);
-			tx_to_c[lcore_id] |= TYPE_REPLAY_RUN;
-			c_to_tx[lcore_id] &= ~TYPE_REPLAY_RUN;
+
+			for (j = 0; j < (nb_rx - PREFETCH_OFFSET); ++j) {
+				rte_prefetch0(rte_pktmbuf_mtod(bufs[j + PREFETCH_OFFSET], void *));
+				crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
+								replay_start, replay_end);
+			}
+
+			/* Forward remaining prefetched packets */
+			for (; j < nb_rx; ++j) {
+				crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
+								replay_start, replay_end);
+			}
+
+			/* Send out packets from TX queues */
+			if (unlikely(systime_ns - last_burst_ns >= BURST_TX_DRAIN_US*1000)) {
+				send_timeout_burst(qconf, systime_ns);
+				last_burst_ns = systime_ns;
+			}
+
+			if (c_to_tx[lcore_id] & TYPE_REPLAY_CLEAR) {
+				for (i = 0; i < nb_ports; ++i) {
+					if (qconf->buf_mbufs[i].len == 0) continue;
+					for (k = 0; k < qconf->buf_mbufs[i].len; ++k) {
+						// double free since the refcnt will be at +2
+						rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[k].m_table, qconf->buf_mbufs[i].m_lens[k]);
+						rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[k].m_table, qconf->buf_mbufs[i].m_lens[k]);
+						qconf->buf_mbufs[i].m_lens[k] = 0;
+					}
+					qconf->buf_mbufs[i].len = 0;
+				}
+				tx_to_c[lcore_id] |= TYPE_REPLAY_CLEAR;
+				c_to_tx[lcore_id] &= ~TYPE_REPLAY_CLEAR;
+			}
+			else if (c_to_tx[lcore_id] & TYPE_REPLAY_RUN) {
+				run_replay(qconf, get_output_port_from_vport(devport_to_vport[portid]), replay_run_start);
+				tx_to_c[lcore_id] |= TYPE_REPLAY_RUN;
+				c_to_tx[lcore_id] &= ~TYPE_REPLAY_RUN;
+			}
 		}
 	}
 	/* >8 End of loop. */
