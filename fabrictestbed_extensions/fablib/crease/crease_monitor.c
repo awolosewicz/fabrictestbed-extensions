@@ -15,11 +15,13 @@
 #include <rte_cycles.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
+#include <rte_malloc.h>
 
 #define NUM_MBUFS 8192
-#define MBUF_CACHE_SIZE 64
+#define MBUF_CACHE_SIZE 128
 #define BURST_SIZE 64
-#define BURST_TX_DRAIN_US 100 /* TX drain every ~100us */
+#define MIN_REPLAY_SIZE 128
+#define BURST_TX_DRAIN_US 1 /* TX drain every ~1us */
 /* Configure how many packets ahead to prefetch, when reading packets */
 #define PREFETCH_OFFSET	3
 
@@ -28,46 +30,14 @@
 #define MAX_RX_MTU 1500
 
 #define	PKT_MBUF_DATA_SIZE	RTE_MBUF_DEFAULT_BUF_SIZE
-#define	HDR_MBUF_DATA_SIZE	128 + RTE_PKTMBUF_HEADROOM
-#define	TLR_MBUF_DATA_SIZE	128 + RTE_PKTMBUF_HEADROOM
 
 #define NSEC_PER_SEC        1000000000L
 
 #define MONPROT 0x6587
-#define MONPROT0 0x65
-#define MONPROT1 0x87
+#define CREASEPROT 254
+#define CREASEVER "Crease Monitor v0.4.0\n"
 
 #define MAX_PORTS 3
-
-#ifdef PROFILING
-#define TIME_BUILD_TRAILER 0
-#define TIME_ADD_TRAILER 1
-#define TIME_ADD_HEADERS 2
-#define TIME_OTHER 3
-#define TIME_TX_PKTS 4
-#define TIME_GET_TIME 5
-
-#define TIME_AVG_BUILD_TRAILER 6
-#define TIME_AVG_ADD_TRAILER 7
-#define TIME_AVG_ADD_HEADERS 8
-#define TIME_AVG_OTHER 9
-#define TIME_AVG_TX_PKTS 10
-#define TIME_AVG_GET_TIME 11
-
-#define TIME_MAX_BUILD_TRAILER 12
-#define TIME_MAX_ADD_TRAILER 13
-#define TIME_MAX_ADD_HEADERS 14
-#define TIME_MAX_OTHER 15
-#define TIME_MAX_TX_PKTS 16
-#define TIME_MAX_GET_TIME 17
-
-#define TIME_MDEV_BUILD_TRAILER 18
-#define TIME_MDEV_ADD_TRAILER 19
-#define TIME_MDEV_ADD_HEADERS 20
-#define TIME_MDEV_OTHER 21
-#define TIME_MDEV_TX_PKTS 22
-#define TIME_MDEV_GET_TIME 23
-#endif
 
 static uint64_t tsc_hz;
 
@@ -76,25 +46,20 @@ static inline uint64_t timespec64_to_ns(const struct timespec *ts)
 	return ((uint64_t) ts->tv_sec * NSEC_PER_SEC) + ts->tv_nsec;
 }
 
-/* basicfwd.c: Basic DPDK skeleton forwarding example. */
-#ifdef PROFILING
-static uint64_t measures[24];
-uint64_t start = 0;
-uint64_t pop_size = 0;
-#endif
 unsigned char ana_headers[64];
 // Ether(14) + IPv6(40) + len(2) + 2xUID(32)
 const uint16_t ana_size = 88;
 uint64_t mon_id;
+uint16_t nb_ports;
+unsigned nb_lcores, c_lcore, max_replay_size;
 static struct rte_mempool *packet_pool, *clone_pool;
 
 static int rx_queue_per_lcore = 1;
 
 #define RX_RING_SIZE 1024
-#define TX_RING_SIZE 1024
+#define TX_RING_SIZE 4096
 static uint16_t nb_rxd = RX_RING_SIZE;
 static uint16_t nb_txd = TX_RING_SIZE;
-/* ethernet addresses of ports */
 static struct rte_ether_addr ports_eth_addr[MAX_PORTS];
 
 static uint16_t vport_to_devport[MAX_PORTS];
@@ -105,6 +70,17 @@ struct mbuf_table {
 	struct rte_mbuf *m_table[BURST_SIZE];
 };
 
+struct mbuf_table_light {
+	struct rte_mbuf *m_table[BURST_SIZE];
+};
+
+struct replay_mbuf_table {
+	uint32_t len;
+	uint64_t *tsc_counts;
+	uint16_t *m_lens;
+	struct mbuf_table_light *m_tables;
+};
+
 #define MAX_RX_QUEUE_PER_LCORE 16
 #define MAX_TX_QUEUE_PER_PORT 16
 struct __rte_cache_aligned lcore_queue_conf {
@@ -113,6 +89,8 @@ struct __rte_cache_aligned lcore_queue_conf {
 	uint8_t rx_queue_list[MAX_RX_QUEUE_PER_LCORE];
 	uint16_t tx_queue_id[MAX_PORTS];
 	struct mbuf_table tx_mbufs[MAX_PORTS];
+	uint16_t buf_queue_id[MAX_PORTS];
+	struct replay_mbuf_table buf_mbufs[MAX_PORTS];
 };
 static struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
@@ -123,40 +101,38 @@ struct __rte_cache_aligned pkt_metadata {
 	//uint32_t ts_lower;
 };
 
+static inline uint64_t
+extract_long(uint8_t* ptr)
+{
+	return ((uint64_t)ptr[0] << 56) |
+		   ((uint64_t)ptr[1] << 48) |
+		   ((uint64_t)ptr[2] << 40) |
+		   ((uint64_t)ptr[3] << 32) |
+		   ((uint64_t)ptr[4] << 24) |
+		   ((uint64_t)ptr[5] << 16) |
+		   ((uint64_t)ptr[6] << 8) |
+		   ((uint64_t)ptr[7]);
+}
+
+#define TYPE_REPLAY_RECORD (uint8_t)1
+#define TYPE_REPLAY_CLEAR (uint8_t)2
+#define TYPE_REPLAY_RUN (uint8_t)4
+#define IDX_REPLAY_RECORD (uint8_t)0
+#define IDX_REPLAY_CLEAR (uint8_t)1
+#define IDX_REPLAY_RUN (uint8_t)2
+uint8_t *c_to_tx;
+uint8_t *tx_to_c;
+uint16_t c_ctrs[8];
+uint64_t replay_start = 0;
+uint64_t replay_end = 0;
+uint64_t replay_run_start = 0;
+
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
 		.mtu = MAX_RX_MTU,
 	},
 	.txmode = {},
 };
-
-bool lendian = false;
-
-static inline uint16_t
-swap_endian_short(uint16_t value) {
-    return ((value >> 8)  & 0x00FF) |
-           ((value << 8)  & 0xFF00);
-}
-
-static inline uint32_t
-swap_endian(uint32_t value) {
-    return ((value >> 24) & 0x000000FF) |
-           ((value >> 8)  & 0x0000FF00) |
-           ((value << 8)  & 0x00FF0000) |
-           ((value << 24) & 0xFF000000);
-}
-
-static inline uint64_t
-swap_endian_long(uint64_t value) {
-    return ((value >> 56) & 0x00000000000000FF) |
-           ((value >> 40) & 0x000000000000FF00) |
-           ((value >> 24) & 0x0000000000FF0000) |
-           ((value >> 8)  & 0x00000000FF000000) |
-           ((value << 8)  & 0x000000FF00000000) |
-           ((value << 24) & 0x0000FF0000000000) |
-           ((value << 40) & 0x00FF000000000000) |
-           ((value << 56) & 0xFF00000000000000);
-}
 
 static void
 print_ethaddr(const char *name, struct rte_ether_addr *eth_addr)
@@ -168,42 +144,95 @@ print_ethaddr(const char *name, struct rte_ether_addr *eth_addr)
 
 /* Send burst of packets on an output interface */
 static void
-send_burst(struct lcore_queue_conf *qconf, uint16_t port)
+send_burst(
+	struct lcore_queue_conf *qconf,
+	const uint16_t outport)
 {
 	struct rte_mbuf **m_table;
-	uint16_t n, queueid;
+	uint16_t len, queueid;
 	int ret;
 
-	queueid = qconf->tx_queue_id[port];
-	m_table = (struct rte_mbuf **)qconf->tx_mbufs[port].m_table;
-	n = qconf->tx_mbufs[port].len;
+	queueid = qconf->tx_queue_id[outport];
+	m_table = (struct rte_mbuf **)qconf->tx_mbufs[outport].m_table;
+	len = qconf->tx_mbufs[outport].len;
 
-	ret = rte_eth_tx_burst(port, queueid, m_table, n);
-	while (unlikely (ret < n)) {
+	ret = rte_eth_tx_burst(outport, queueid, m_table, len);
+	while (unlikely (ret < len)) {
 		rte_pktmbuf_free(m_table[ret]);
 		ret++;
 	}
 
-	qconf->tx_mbufs[port].len = 0;
+	qconf->tx_mbufs[outport].len = 0;
+}
+
+static void
+send_burst_replayable(
+	struct lcore_queue_conf *qconf,
+	const uint16_t outport,
+	const uint64_t systime_ns,
+	const uint64_t copy_replay_start,
+	const uint64_t copy_replay_end)
+{
+	struct rte_mbuf **m_table;
+	uint32_t rep_len;
+	uint16_t len, queueid;
+	int ret;
+
+	queueid = qconf->tx_queue_id[outport];
+	m_table = (struct rte_mbuf **)qconf->tx_mbufs[outport].m_table;
+	len = qconf->tx_mbufs[outport].len;
+
+	ret = rte_eth_tx_burst(outport, queueid, m_table, len);
+	if (unlikely(ret < len)) {
+		rte_pktmbuf_free_bulk(&m_table[ret], len - ret);
+		//printf("Failed to send all packets, sent %d, total %d\n", ret, len);
+	}
+
+	if (unlikely(systime_ns <= copy_replay_end && systime_ns >= copy_replay_start)) {
+		rep_len = qconf->buf_mbufs[outport].len;
+		if (unlikely(rep_len >= max_replay_size)) {
+			printf("Replay buffer overflow, rep_len %u, not storing packets\n", rep_len);
+			rte_pktmbuf_free_bulk(m_table, len);
+			qconf->tx_mbufs[outport].len = 0;
+			return;
+		}
+		rte_memcpy(qconf->buf_mbufs[outport].m_tables[rep_len].m_table, m_table, len * sizeof(struct rte_mbuf*));
+		qconf->buf_mbufs[outport].m_lens[rep_len] = len;
+		qconf->buf_mbufs[outport].tsc_counts[rep_len] = rte_rdtsc_precise();
+		qconf->buf_mbufs[outport].len = ++rep_len;
+	}
+	else {
+		// Double free since the refcnt will be at +2
+		rte_pktmbuf_free_bulk(m_table, len);
+		rte_pktmbuf_free_bulk(m_table, len);
+	}
+
+	qconf->tx_mbufs[outport].len = 0;
 }
 
 /* Send burst of outgoing packet, if timeout expires. */
 static inline void
-send_timeout_burst(struct lcore_queue_conf *qconf)
+send_timeout_burst(struct lcore_queue_conf *qconf, const uint64_t systime_ns)
 {
-	//uint64_t cur_tsc;
 	uint16_t portid;
-	//const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * BURST_TX_DRAIN_US;
-
-	//cur_tsc = rte_rdtsc();
-	//if (likely (cur_tsc < qconf->tx_tsc + drain_tsc))
-	//	return;
 
 	for (portid = 0; portid < MAX_PORTS; portid++) {
-		if (qconf->tx_mbufs[portid].len != 0)
-			send_burst(qconf, portid);
+		if (qconf->tx_mbufs[portid].len != 0) {
+			if (portid == vport_to_devport[0]) {
+				send_burst(qconf, portid);
+			}
+			else {
+				send_burst_replayable(qconf, portid, systime_ns, replay_start, replay_end);
+			}
+		}
 	}
-	//qconf->tx_tsc = cur_tsc;
+}
+
+/* Get the output devport of input vport */
+static inline uint16_t
+get_output_port_from_vport(uint16_t input_port) {
+	if (input_port == 1) return vport_to_devport[2];
+	return vport_to_devport[1];
 }
 
 /**
@@ -222,10 +251,11 @@ crinkle_forward(
 	struct rte_mbuf *buf,
 	struct lcore_queue_conf *qconf,
 	const uint64_t systime_ns,
-	const uint64_t port)
+	const uint64_t port,
+	const uint64_t copy_replay_start,
+	const uint64_t copy_replay_end)
 {
-	uint16_t len;
-	uint16_t outport;
+	uint16_t len, outport, pkt_size;
 	struct pkt_metadata uid_trailer;
 	const uint32_t *candidate_trailer_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
 	uint32_t candidate_trailer = *candidate_trailer_ptr;
@@ -239,7 +269,7 @@ crinkle_forward(
 
 	// Build trailer
 	uid_trailer.systime_ns = rte_cpu_to_be_64(systime_ns);
-	uid_trailer.trailer = rte_cpu_to_be_64((mon_id << 48) + (port << 32) + ((uid_trailer.systime_ns << 16) & 0x00000000FFFF0000) + MONPROT);
+	uid_trailer.trailer = rte_cpu_to_be_64((mon_id << 48) | (port << 32) | ((uid_trailer.systime_ns << 16) & 0x00000000FFFF0000) | MONPROT);
 
 	// Check for existing UUID trailer
 	if ((candidate_trailer & 0x0000FFFF) != MONPROT || (candidate_trailer >> 16) != (ts_lower & 0x0000FFFF)) {
@@ -251,9 +281,7 @@ crinkle_forward(
 		rte_mov16(trailer, (uint8_t *)(&uid_trailer));
 	}
 
-
-
-	uint16_t pkt_size = rte_cpu_to_be_64(buf->data_len);
+	pkt_size = rte_cpu_to_be_16(buf->data_len);
 	if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
 		printf("Failed to append clone packet");
 		rte_pktmbuf_free(cbuf);
@@ -264,27 +292,108 @@ crinkle_forward(
 	rte_mov16(c+56, (uint8_t *)(&uid_trailer));
 	rte_mov16(c+72, trailer);
 	
-
-	//uint64_t end5 = rte_get_tsc_cycles();
-
-	if (port == 1) {
-		outport = vport_to_devport[2];
-	} else {
-		outport = vport_to_devport[1];
-	}
+	outport = get_output_port_from_vport(port);
 	
 	len = qconf->tx_mbufs[outport].len;
 	qconf->tx_mbufs[outport].m_table[len] = buf;
 	qconf->tx_mbufs[outport].len = ++len;
+	rte_pktmbuf_refcnt_update(buf, 2);
 	if (unlikely(BURST_SIZE == len))
-		send_burst(qconf, outport);
-
+		send_burst_replayable(qconf, outport, systime_ns, copy_replay_start, copy_replay_end);
 	
 	len = qconf->tx_mbufs[vport_to_devport[0]].len;
 	qconf->tx_mbufs[vport_to_devport[0]].m_table[len] = cbuf;
 	qconf->tx_mbufs[vport_to_devport[0]].len = ++len;
 	if (unlikely(BURST_SIZE == len))
 	 	send_burst(qconf, vport_to_devport[0]);
+}
+
+static inline void
+run_replay(
+	struct lcore_queue_conf *qconf,
+	const uint16_t port,
+	const uint64_t start_time
+)
+{
+	if (unlikely(qconf->buf_mbufs[port].len == 0)) return;
+	uint32_t ptr = 0;
+	uint32_t i;
+	int ret;
+
+	uint64_t tsc_delta = ((start_time - replay_start) / NSEC_PER_SEC) * tsc_hz;
+	uint64_t tsc_start = qconf->buf_mbufs[port].tsc_counts[0] + tsc_delta;
+	uint64_t curr_tsc;
+
+	while (ptr < qconf->buf_mbufs[port].len) {
+		curr_tsc = rte_rdtsc_precise();
+		if (tsc_start <= curr_tsc) {
+			ret = rte_eth_tx_burst(port, qconf->tx_queue_id[port],
+								   qconf->buf_mbufs[port].m_tables[ptr].m_table, qconf->buf_mbufs[port].m_lens[ptr]);
+			if (unlikely(ret < qconf->buf_mbufs[port].m_lens[ptr])) {
+				rte_pktmbuf_free_bulk(&qconf->buf_mbufs[port].m_tables[ptr].m_table[ret], qconf->buf_mbufs[port].m_lens[ptr] - ret);
+				printf("Failed to send all packets, sent %d, total %d\n", ret, qconf->buf_mbufs[port].m_lens[ptr]);
+			}
+			++ptr;
+			//tsc_start += qconf->buf_mbufs[port].tsc_counts[ptr] - qconf->buf_mbufs[port].tsc_counts[ptr-1];
+			tsc_start = qconf->buf_mbufs[port].tsc_counts[ptr] + tsc_delta;
+		}
+	}
+	ptr = 0;
+	// Does the refcnt update second so that replay can happen immediately
+	while (ptr < qconf->buf_mbufs[port].len) {
+		for(i = 0; i < qconf->buf_mbufs[port].m_lens[ptr]; ++i) {
+			rte_pktmbuf_refcnt_update(qconf->buf_mbufs[port].m_tables[ptr].m_table[i], 1);
+		}
+		++ptr;
+	}
+}
+
+static inline void
+crinkle_command_handler(
+	struct rte_mbuf *buf,
+	const uint64_t systime_ns)
+{
+	uint8_t* cursor = rte_pktmbuf_mtod_offset(buf, uint8_t*, 12);
+	unsigned i;
+	if (*cursor != 0x86 || *(cursor + 1) != 0xDD) return;
+	cursor += 2 + 6;
+	if (*cursor != CREASEPROT) return;
+	cursor += 2 + 32;
+
+	if (*cursor == TYPE_REPLAY_RECORD) {
+		printf("Replay record command received\n");
+		replay_start = extract_long(++cursor);
+		cursor += 8;
+		replay_end = extract_long(cursor);
+		printf("Replay record start: %lu, end: %lu\n", replay_start, replay_end);
+	}
+	else if (*cursor == TYPE_REPLAY_CLEAR) {
+		printf("Replay clear command received\n");
+		// if c_ctrs is > 0, that means one or more worker threads have not finished
+		// handling the last command
+		if (unlikely(c_ctrs[IDX_REPLAY_CLEAR] > 0)) return;
+		if (unlikely(c_ctrs[IDX_REPLAY_RUN] > 0)) return;
+		replay_end = 0;
+		for (i = 0; i < nb_lcores; ++i) {
+			if (unlikely(i == c_lcore)) continue;
+			c_to_tx[i] |= TYPE_REPLAY_CLEAR;
+		}
+		c_ctrs[IDX_REPLAY_CLEAR] = nb_lcores;
+		printf("Clearing replay buffers\n");
+	}
+	else if (*cursor == TYPE_REPLAY_RUN) {
+		printf("Replay run command received\n");
+		if (unlikely(replay_end == 0 || systime_ns < replay_end)) return;
+		if (unlikely(c_ctrs[IDX_REPLAY_CLEAR] > 0)) return;
+		if (unlikely(c_ctrs[IDX_REPLAY_RUN] > 0)) return;
+		replay_run_start = extract_long(++cursor);
+		for (i = 0; i < nb_lcores; ++i) {
+			if (unlikely(i == c_lcore)) continue;
+			c_to_tx[i] |= TYPE_REPLAY_RUN;
+		}
+		c_ctrs[IDX_REPLAY_RUN] = nb_lcores;
+		printf("Replay run start: %lu\n", replay_run_start);
+	}
 }
 
 /*
@@ -297,7 +406,7 @@ static int
 lcore_main(__rte_unused void *dummy)
 {
 	struct rte_mbuf *bufs[BURST_SIZE];
-	unsigned lcore_id;
+	unsigned lcore_id, k;
 	int i, j, nb_rx;
 	uint16_t portid;
 	struct lcore_queue_conf *qconf;
@@ -316,48 +425,80 @@ lcore_main(__rte_unused void *dummy)
 	uint64_t systime_ns;
 	uint64_t last_burst_ns = 0;
 
-	// Tests for little endian memory, since we must write to packet
-	// buffers values in big-endian format
-	int num = 1;
-	if (*(char *)&num == 1) {
-        lendian = true;
-    }
-
 	for (i = 0; i < qconf->n_rx_queue; ++i) {
 		portid = qconf->rx_queue_list[i];
 		printf(" -- lcoreid=%u portid=%d\n", lcore_id, portid);
 	}
 
-	if (portid == vport_to_devport[0]) {
-		return 0;
-	}
-	else {
-		while (1) {	
-			clock_gettime(CLOCK_REALTIME, &systime);
-			systime_ns = timespec64_to_ns(&systime);
-			for (i = 0; i < qconf->n_rx_queue; ++i) {
-				portid = qconf->rx_queue_list[i];
-				nb_rx = rte_eth_rx_burst(portid, 0, bufs, BURST_SIZE);
+	uint32_t ctr_max = 10000000;
 
-				
-				for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; j++) {
-					rte_prefetch0(rte_pktmbuf_mtod(bufs[j], void *));
+	while (1) {
+		clock_gettime(CLOCK_REALTIME, &systime);
+		systime_ns = timespec64_to_ns(&systime);
+		portid = qconf->rx_queue_list[0];
+		nb_rx = 0;
+		if (portid == vport_to_devport[0]) {
+			nb_rx = rte_eth_rx_burst(portid, 0, bufs, BURST_SIZE);
+
+			for (i = 0; i < nb_rx; ++i) {
+				crinkle_command_handler(bufs[i], systime_ns);
+			}
+
+			for (k = 0; k < nb_lcores; ++k) {
+				if (unlikely(k == c_lcore)) continue;
+				if (tx_to_c[k] & TYPE_REPLAY_CLEAR) {
+					--c_ctrs[IDX_REPLAY_CLEAR];
+					tx_to_c[k] &= ~TYPE_REPLAY_CLEAR;
 				}
-
-				for (j = 0; j < (nb_rx - PREFETCH_OFFSET); j++) {
-					rte_prefetch0(rte_pktmbuf_mtod(bufs[j + PREFETCH_OFFSET], void *));
-					crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid]);
-				}
-
-				/* Forward remaining prefetched packets */
-				for (; j < nb_rx; j++) {
-					crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid]);
+				if (tx_to_c[k] & TYPE_REPLAY_RUN) {
+					--c_ctrs[IDX_REPLAY_RUN];
+					tx_to_c[k] &= ~TYPE_REPLAY_RUN;
 				}
 			}
+		}
+		else {
+			nb_rx = rte_eth_rx_burst(portid, 0, bufs, BURST_SIZE);
+			
+			for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; ++j) {
+				rte_prefetch0(rte_pktmbuf_mtod(bufs[j], void *));
+			}
+
+			for (j = 0; j < (nb_rx - PREFETCH_OFFSET); ++j) {
+				rte_prefetch0(rte_pktmbuf_mtod(bufs[j + PREFETCH_OFFSET], void *));
+				crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
+								replay_start, replay_end);
+			}
+
+			/* Forward remaining prefetched packets */
+			for (; j < nb_rx; ++j) {
+				crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
+								replay_start, replay_end);
+			}
+
 			/* Send out packets from TX queues */
-			if (unlikely(systime_ns - last_burst_ns >= 100*1000)) {
-				send_timeout_burst(qconf);
+			if (unlikely(systime_ns - last_burst_ns >= BURST_TX_DRAIN_US*1000)) {
+				send_timeout_burst(qconf, systime_ns);
 				last_burst_ns = systime_ns;
+			}
+
+			if (c_to_tx[lcore_id] & TYPE_REPLAY_CLEAR) {
+				for (i = 0; i < nb_ports; ++i) {
+					if (qconf->buf_mbufs[i].len == 0) continue;
+					for (k = 0; k < qconf->buf_mbufs[i].len; ++k) {
+						// double free since the refcnt will be at +2
+						rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[k].m_table, qconf->buf_mbufs[i].m_lens[k]);
+						rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[k].m_table, qconf->buf_mbufs[i].m_lens[k]);
+						qconf->buf_mbufs[i].m_lens[k] = 0;
+					}
+					qconf->buf_mbufs[i].len = 0;
+				}
+				tx_to_c[lcore_id] |= TYPE_REPLAY_CLEAR;
+				c_to_tx[lcore_id] &= ~TYPE_REPLAY_CLEAR;
+			}
+			else if (c_to_tx[lcore_id] & TYPE_REPLAY_RUN) {
+				run_replay(qconf, get_output_port_from_vport(devport_to_vport[portid]), replay_run_start);
+				tx_to_c[lcore_id] |= TYPE_REPLAY_RUN;
+				c_to_tx[lcore_id] &= ~TYPE_REPLAY_RUN;
 			}
 		}
 	}
@@ -384,7 +525,7 @@ main(int argc, char *argv[])
 	argv += ret;
 
 	/* Check that there is an even number of ports to send/receive on. */
-	unsigned nb_ports = rte_eth_dev_count_avail();
+	nb_ports = rte_eth_dev_count_avail();
 	
 	int arg;
 	bool set_mon_id = false;
@@ -397,8 +538,10 @@ main(int argc, char *argv[])
 	rte_memcpy(&ana_headers[54], padding, 10);
 	bool macdst = false;
 	bool ipdst = false;
+	uint16_t vport, devport;
+	int parsed = 0;
 
-	while ((arg = getopt(argc, argv, "n:d:m:i:hv")) != -1) {
+	while ((arg = getopt(argc, argv, "n:d:m:i:r:hv")) != -1) {
 		switch (arg) {
 			case 'n':
 				mon_id = strtol(optarg, NULL, 0);
@@ -406,14 +549,12 @@ main(int argc, char *argv[])
 				break;
 			case 'd':
 				// [dpdk virtual port]@[device number as parsed into dpdk]
-				uint16_t vport, devport;
 				sscanf(optarg, "%hu@%hu", &vport, &devport);
 				vport_to_devport[vport] = devport;
 				devport_to_vport[devport] = vport;
 				break;
 			case 'm':
 				// MAC addresses, source then dest
-				int parsed = 0;
 				if (macdst) {
 					parsed = sscanf(optarg, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
 									&ana_headers[0], &ana_headers[1], &ana_headers[2],
@@ -445,17 +586,21 @@ main(int argc, char *argv[])
 					ipdst = true;
 				}
 				break;
+			case 'r':
+				sscanf(optarg, "%u", &max_replay_size);
+				break;
 			case 'h':
 				printf("Available options:\n");
 				printf("  -n    Set monitor ID\n");
 				printf("  -d    Set virtual-actual device mappings, as [virtual]@[actual], actual as parsed by dpdk\n");
 				printf("  -m    Set MAC addresses for analyzer (source then dest)\n");
 				printf("  -i    Set IP addresses for analyzer (source then dest)\n");
+				printf("  -r    Set maximum replay size, default %u\n", MIN_REPLAY_SIZE);
 				printf("  -h    Print this help\n");
 				printf("  -v    Print version\n");
 				exit(EXIT_SUCCESS);
 			case 'v':
-				printf("Crease Monitor v0.3.1\n");
+				printf(CREASEVER);
 				exit(EXIT_SUCCESS);
 			case '?':
 				switch (optopt) {
@@ -485,8 +630,17 @@ main(int argc, char *argv[])
 			rte_exit(EXIT_FAILURE, "Invalid port mapping for virtual port %hu: %hu.\n", i, vport_to_devport[i]);
 		}
 	}
+	if (max_replay_size < MIN_REPLAY_SIZE) max_replay_size = MIN_REPLAY_SIZE;
 
-	packet_pool = rte_pktmbuf_pool_create("packet_pool", NUM_MBUFS, MBUF_CACHE_SIZE,
+	printf(CREASEVER);
+	printf("Monitor ID: %lu\n", mon_id);
+	printf("Virtual port to device port mapping:\n");
+	for (uint16_t i = 0; i < nb_ports; ++i) {
+		printf("  Virtual port %hu -> Device port %hu\n", i, vport_to_devport[i]);
+	}
+	printf("Maximum replay size: %u\n", max_replay_size);
+
+	packet_pool = rte_pktmbuf_pool_create("packet_pool", (max_replay_size+256)*BURST_SIZE, MBUF_CACHE_SIZE,
 		0, PKT_MBUF_DATA_SIZE, rte_socket_id());
 
 	if (packet_pool == NULL)
@@ -498,7 +652,9 @@ main(int argc, char *argv[])
 	if (clone_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init clone mbuf pool\n");
 
-	uint32_t nb_lcores = rte_lcore_count();
+	nb_lcores = rte_lcore_count();
+	c_to_tx = rte_malloc("uint8_t", nb_lcores*sizeof(uint8_t), 0);
+	tx_to_c = rte_malloc("uint8_t", nb_lcores*sizeof(uint8_t), 0);
 	uint16_t portid;
 	uint32_t n_tx_queue;
 	unsigned lcore_id = 0, rx_lcore_id = 0;
@@ -542,6 +698,8 @@ main(int argc, char *argv[])
 		printf("Initializing port %d on lcore %u... ", portid,
 		       rx_lcore_id);
 		fflush(stdout);
+
+		if (portid == devport_to_vport[0]) c_lcore = rx_lcore_id;
 
 		n_tx_queue = nb_lcores;
 		if (n_tx_queue > MAX_TX_QUEUE_PER_PORT)
@@ -593,7 +751,7 @@ main(int argc, char *argv[])
 			fflush(stdout);
 
 			txconf = &dev_info.default_txconf;
-			printf("txconf offloads: 0x%" PRIx64 "\n", txconf->offloads);
+			//printf("txconf offloads: 0x%" PRIx64 "\n", txconf->offloads);
 			ret = rte_eth_tx_queue_setup(portid, queueid, nb_txd,
 						     rte_lcore_to_socket_id(lcore_id), txconf);
 			if (ret < 0)
@@ -602,8 +760,14 @@ main(int argc, char *argv[])
 
 			qconf = &lcore_queue_conf[lcore_id];
 			qconf->tx_queue_id[portid] = queueid;
+			qconf->buf_queue_id[portid] = queueid;
+
+			qconf->buf_mbufs[portid].tsc_counts = rte_malloc("uint64_t", max_replay_size*sizeof(uint64_t), 0);
+			qconf->buf_mbufs[portid].m_lens = rte_malloc("uint16_t", max_replay_size*sizeof(uint16_t), 0);
+			qconf->buf_mbufs[portid].m_tables = rte_malloc("mbuf_table_light", max_replay_size*sizeof(struct mbuf_table_light), 0);
 			queueid++;
 		}
+
 		ret = rte_eth_promiscuous_enable(portid);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE,
