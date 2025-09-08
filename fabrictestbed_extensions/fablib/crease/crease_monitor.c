@@ -16,6 +16,7 @@
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
 #include <rte_malloc.h>
+#include <rte_ring.h>
 
 #define NUM_MBUFS 8192
 #define MBUF_CACHE_SIZE 128
@@ -51,8 +52,9 @@ unsigned char ana_headers[64];
 const uint16_t ana_size = 88;
 uint64_t mon_id;
 uint16_t nb_ports;
-unsigned nb_lcores, c_lcore, max_replay_size;
+unsigned nb_lcores, c_lcore, max_replay_size, nb_ana_cores, nb_cores_per_port;
 static struct rte_mempool *packet_pool, *clone_pool;
+static struct rte_ring *clone_ring;
 
 static int rx_queue_per_lcore = 1;
 
@@ -93,6 +95,8 @@ struct __rte_cache_aligned lcore_queue_conf {
 	struct replay_mbuf_table buf_mbufs[MAX_PORTS];
 };
 static struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
+
+
 
 struct __rte_cache_aligned pkt_metadata {
 	uint64_t systime_ns;
@@ -644,31 +648,147 @@ main(int argc, char *argv[])
 		0, PKT_MBUF_DATA_SIZE, rte_socket_id());
 
 	if (packet_pool == NULL)
-		rte_exit(EXIT_FAILURE, "Cannot init packet mbuf pool\n");
+		rte_exit(EXIT_FAILURE, "Cannot init packet mbuf pool: %s\n", rte_strerror(rte_errno));
 
 	clone_pool = rte_pktmbuf_pool_create("clone_pool", NUM_MBUFS , MBUF_CACHE_SIZE,
 		0, 0, rte_socket_id());
 
 	if (clone_pool == NULL)
-		rte_exit(EXIT_FAILURE, "Cannot init clone mbuf pool\n");
+		rte_exit(EXIT_FAILURE, "Cannot init clone mbuf pool: %s\n", rte_strerror(rte_errno));
+
+	clone_ring = rte_ring_create("clone_ring", NUM_MBUFS, rte_socket_id(), RING_F_MP_HTS_ENQ | RING_F_MC_HTS_DEQ);
+
+	if (clone_ring == NULL)
+		rte_exit(EXIT_FAILURE, "Cannot create clone ring: %s\n", rte_strerror(rte_errno));
+
+	struct rte_ring *tx_rings[nb_ports - 1];
+	for (uint16_t i = 0; i < nb_ports - 1; ++i) {
+		char ring_name[32];
+		snprintf(ring_name, 32, "tx_ring_%d", i);
+		tx_rings[i] = rte_ring_create(ring_name, NUM_MBUFS, rte_socket_id(), RING_F_MP_HTS_ENQ | RING_F_MC_HTS_DEQ);
+		if (tx_rings[i] == NULL)
+			rte_exit(EXIT_FAILURE, "Cannot create tx ring %d: %s\n", i, rte_strerror(rte_errno));
+	}
 
 	nb_lcores = rte_lcore_count();
-	c_to_tx = rte_malloc("uint8_t", nb_lcores*sizeof(uint8_t), 0);
-	tx_to_c = rte_malloc("uint8_t", nb_lcores*sizeof(uint8_t), 0);
+	nb_ana_cores = 1;
+	nb_cores_per_port = (nb_lcores - 1 - nb_ana_cores) / (nb_ports - 1);
+	if (nb_cores_per_port == 0) {
+		rte_exit(EXIT_FAILURE, "Not enough cores, need at least %u\n", (nb_ports - 1 + nb_ana_cores + 1));
+	}
+	c_to_tx = rte_malloc("uint8_t", (nb_lcores - 1)*sizeof(uint8_t), 0);
+	tx_to_c = rte_malloc("uint8_t", (nb_lcores - 1)*sizeof(uint8_t), 0);
 	uint16_t portid;
 	uint32_t n_tx_queue;
-	unsigned lcore_id = 0, rx_lcore_id = 0;
+	unsigned lcore_id = 1, rx_lcore_id = 1;
 	struct lcore_queue_conf *qconf;
 	struct rte_eth_dev_info dev_info;
 	struct rte_eth_txconf *txconf;
 	uint16_t queueid;
 
-	/* Initializing all ports. 8< */
-	RTE_ETH_FOREACH_DEV(portid) {
+	/*
+	 * Master core handles command handling
+	 * ana cores handle sending to analyzer
+	 * other cores handle other ports
+	 * Master core, for now, solely receives commands and instructs others
+	 * Ana core solely handles transmission out of port to analyzer
+	 * Other cores receive traffic, add trailer, create clone
+	 * they write the clone to a ring the ana cores consume from
+	 * Setup must configure ports and then rings.
+	 */
+
+	
+
+	/* Initialize ana port */
+	if (1) {
 		struct rte_eth_rxconf rxq_conf;
 		struct rte_eth_conf local_port_conf = port_conf;
 
-		qconf = &lcore_queue_conf[rx_lcore_id];
+		ret = rte_eth_dev_info_get(portid, &dev_info);
+		if (ret != 0)
+			rte_exit(EXIT_FAILURE,
+				"Error during getting device (port %u) info: %s\n",
+				portid, strerror(-ret));
+
+		local_port_conf.rxmode.mtu = RTE_MIN(
+			dev_info.max_mtu,
+			local_port_conf.rxmode.mtu);
+
+		c_lcore = 0;
+		qconf = &lcore_queue_conf[c_lcore];
+		printf("Initializing port %d on lcore %u... ", portid,
+			rx_lcore_id);
+		fflush(stdout);
+
+		ret = rte_eth_dev_configure(portid, 1, nb_ana_cores,
+					&local_port_conf);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "Cannot configure device: err=%s, port=%d\n",
+				 strerror(-ret), portid);
+
+		qconf->rx_queue_list[qconf->n_rx_queue] = portid;
+		qconf->n_rx_queue++;
+
+		ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd,
+						       &nb_txd);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE,
+				 "Cannot adjust number of descriptors: err=%s, port=%d\n",
+				 strerror(-ret), portid);
+
+		ret = rte_eth_macaddr_get(portid, &ports_eth_addr[portid]);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE,
+				 "Cannot get MAC address: err=%s, port=%d\n",
+				 strerror(-ret), portid);
+
+		print_ethaddr(" Address:", &ports_eth_addr[portid]);
+		printf(", ");
+
+		/* init one RX queue */
+		queueid = 0;
+		printf("rxq=%hu ", queueid);
+		fflush(stdout);
+		rxq_conf = dev_info.default_rxconf;
+		rxq_conf.offloads = local_port_conf.rxmode.offloads;
+		ret = rte_eth_rx_queue_setup(portid, queueid, nb_rxd,
+					     rte_eth_dev_socket_id(portid),
+					     &rxq_conf,
+					     packet_pool);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%s, port=%d\n",
+				  strerror(-ret), portid);
+		
+		for (lcore_id = 1; lcore_id <= nb_ana_cores; ++lcore_id) {
+			if (rte_lcore_is_enabled(lcore_id) == 0)
+				continue;
+			printf("txq=%u,%hu ", lcore_id, queueid);
+			fflush(stdout);
+
+			txconf = &dev_info.default_txconf;
+			//printf("txconf offloads: 0x%" PRIx64 "\n", txconf->offloads);
+			ret = rte_eth_tx_queue_setup(portid, queueid, nb_txd,
+						     rte_lcore_to_socket_id(lcore_id), txconf);
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%s, "
+					  "port=%d\n", strerror(-ret), portid);
+
+			qconf = &lcore_queue_conf[lcore_id];
+			qconf->tx_queue_id[portid] = queueid;
+			qconf->buf_queue_id[portid] = queueid;
+
+			qconf->buf_mbufs[portid].tsc_counts = rte_malloc("uint64_t", max_replay_size*sizeof(uint64_t), 0);
+			qconf->buf_mbufs[portid].m_lens = rte_malloc("uint16_t", max_replay_size*sizeof(uint16_t), 0);
+			qconf->buf_mbufs[portid].m_tables = rte_malloc("mbuf_table_light", max_replay_size*sizeof(struct mbuf_table_light), 0);
+			queueid++;
+		}
+	}
+
+	/* Initializing all ports. 8< */
+	RTE_ETH_FOREACH_DEV(portid) {
+		if (portid == vport_to_devport[0]) continue;
+		struct rte_eth_rxconf rxq_conf;
+		struct rte_eth_conf local_port_conf = port_conf;
 
 		/* limit the frame size to the maximum supported by NIC */
 		ret = rte_eth_dev_info_get(portid, &dev_info);
@@ -681,35 +801,33 @@ main(int argc, char *argv[])
 		    dev_info.max_mtu,
 		    local_port_conf.rxmode.mtu);
 
-		/* get the lcore_id for this port */
-		while (rte_lcore_is_enabled(rx_lcore_id) == 0 ||
-		       qconf->n_rx_queue == (unsigned)rx_queue_per_lcore) {
-
-			rx_lcore_id ++;
-			qconf = &lcore_queue_conf[rx_lcore_id];
-
-			if (rx_lcore_id >= RTE_MAX_LCORE)
-				rte_exit(EXIT_FAILURE, "Not enough cores\n");
+		if (portid == vport_to_devport[0]) {
 		}
+		else {
+			/* get the lcore_id for this port */
+			while (rte_lcore_is_enabled(rx_lcore_id) == 0 ||
+				qconf->n_rx_queue == (unsigned)rx_queue_per_lcore) {
+
+				rx_lcore_id ++;
+				qconf = &lcore_queue_conf[rx_lcore_id];
+
+				if (rx_lcore_id >= RTE_MAX_LCORE)
+					rte_exit(EXIT_FAILURE, "Not enough cores\n");
+			}
+			printf("Initializing port %d on lcore %u... ", portid,
+				rx_lcore_id);
+			fflush(stdout);
+			ret = rte_eth_dev_configure(portid, 1, nb_cores_per_port,
+						&local_port_conf);
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%d\n",
+					  ret, portid);
+		}
+
 		qconf->rx_queue_list[qconf->n_rx_queue] = portid;
 		qconf->n_rx_queue++;
 
 		/* init port */
-		printf("Initializing port %d on lcore %u... ", portid,
-		       rx_lcore_id);
-		fflush(stdout);
-
-		if (portid == devport_to_vport[0]) c_lcore = rx_lcore_id;
-
-		n_tx_queue = nb_lcores;
-		if (n_tx_queue > MAX_TX_QUEUE_PER_PORT)
-			n_tx_queue = MAX_TX_QUEUE_PER_PORT;
-
-		ret = rte_eth_dev_configure(portid, 1, (uint16_t)n_tx_queue,
-					    &local_port_conf);
-		if (ret < 0)
-			rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%d\n",
-				  ret, portid);
 
 		ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd,
 						       &nb_txd);
