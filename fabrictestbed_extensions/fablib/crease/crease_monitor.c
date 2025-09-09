@@ -36,7 +36,7 @@
 
 #define MONPROT 0x6587
 #define CREASEPROT 254
-#define CREASEVER "Crease Monitor v0.4.0\n"
+#define CREASEVER "Crease Monitor v0.5.0\n"
 
 #define MAX_PORTS 3
 
@@ -56,7 +56,7 @@ unsigned nb_lcores, c_lcore, max_replay_size, nb_ana_cores, nb_cores_per_port;
 static struct rte_mempool *packet_pool, *clone_pool, *replay_pool;
 static struct rte_ring *clone_ring, *replay_ring, *tx_rings[MAX_PORTS - 1];
 
-static int rx_queue_per_lcore = 1;
+//static int rx_queue_per_lcore = 1;
 
 #define RX_RING_SIZE 1024
 #define TX_RING_SIZE 4096
@@ -189,7 +189,6 @@ send_burst_replayable(
 	struct replay_buf *rbuf;
 	int reti;
 	unsigned retu;
-	uint32_t rep_len;
 	uint16_t nb_tx;
 	nb_tx = rte_eth_tx_burst(outport, queueid, bufs, nb_rx);
 	if (unlikely(nb_tx < nb_rx)) {
@@ -198,7 +197,7 @@ send_burst_replayable(
 	}
 
 	if (unlikely(systime_ns <= copy_replay_end && systime_ns >= copy_replay_start)) {
-		reti = rte_mempool_get(replay_pool, rbuf);
+		reti = rte_mempool_get(replay_pool, (void **)&rbuf);
 		if (unlikely(reti < 0)) {
 			printf("Error getting replay buf: %s\n", rte_strerror(-reti));
 		}
@@ -212,7 +211,7 @@ send_burst_replayable(
 		rbuf->tsc = rte_rdtsc_precise();
 		rbuf->len = nb_tx;
 		rte_memcpy(rbuf->bufs, bufs, nb_tx * sizeof(struct rte_mbuf *));
-		rte_ring_enqueue_finish(replay_ring, rbuf, 1);
+		rte_ring_enqueue_finish(replay_ring, (void *)rbuf, 1);
 	}
 	else {
 		// Double free since the refcnt will be at +2
@@ -316,7 +315,7 @@ crinkle_process_burst(
 	struct rte_mbuf *buf;
 	struct pkt_metadata *pkt;
 	uint32_t *cand_tlr_ptr, ts_lower;
-	uint16_t len, outport, pkt_size, i;
+	uint16_t i;
 	uint8_t *tlr;
 
 	for (i = 0; i < nb_rx; ++i) {
@@ -354,8 +353,8 @@ ana_clone_and_tx(
 	struct tlr_struct uid_trailer;
 	uint8_t *c;
 	unsigned nb_deq, nb_tx;
-	uint16_t i, pkt_size, queueid, outport;
-	nb_deq = rte_ring_dequeue_bulk(clone_ring, pkts, BURST_SIZE, NULL);
+	uint16_t i, pkt_size;
+	nb_deq = rte_ring_dequeue_bulk(clone_ring, (void **)pkts, BURST_SIZE, NULL);
 
 	if (nb_deq > 0) {
 		for (i = 0; i < nb_deq; ++i) {
@@ -377,7 +376,7 @@ ana_clone_and_tx(
 			rte_mov16(c+72, rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16));
 		}
 
-		nb_tx = rte_eth_tx_burst(outport, queueid, cbufs, nb_deq);
+		nb_tx = rte_eth_tx_burst(outport, queue_id, cbufs, nb_deq);
 		if (unlikely(nb_tx < nb_deq)) {
 			rte_pktmbuf_free_bulk(&cbufs[nb_tx], nb_deq - nb_tx);
 		}
@@ -473,31 +472,30 @@ crinkle_command_handler(
 
 static int
 ana_main(
-	const uint32_t arg) 
+	void *arg) 
 {
 	struct pkt_metadata *pkts[BURST_SIZE];
 	struct rte_mbuf *cbufs[BURST_SIZE];
-	const uint16_t queue_id = (uint16_t)(arg & 0xFFFF);
+	const uint16_t queue_id = (uint16_t)(*(uint32_t *)arg & 0xFFFF);
 	const uint16_t outport = get_output_port_from_vport(0);
 	ana_clone_and_tx(pkts, cbufs, outport, queue_id);
+	return 0;
 }
 
 static int
 crinkle_rx(
-	const uint32_t arg)
+	void *arg)
 {
 	struct rte_mbuf *bufs[BURST_SIZE];
 	struct pkt_metadata *pkts[BURST_SIZE];
 	struct timespec ts;
 	uint64_t systime_ns;
-	int nb_rx, ret;
-	uint16_t i, k;
-	const unsigned lcore_id = rte_lcore_id();
-	const uint16_t port_id = (uint16_t)(arg >> 16);
-	const uint16_t queue_id = (uint16_t)(arg & 0xFFFF);
+	int nb_rx;
+	const uint16_t port_id = (uint16_t)(*(uint32_t *)arg >> 16);
+	const uint16_t queue_id = (uint16_t)(*(uint32_t *)arg & 0xFFFF);
 	const uint16_t vport = devport_to_vport[port_id];
 	const uint16_t outport = get_output_port_from_vport(vport);
-	struct rte_ring *tx_ring = tx_rings[vport - 1];
+	//struct rte_ring *tx_ring = tx_rings[vport - 1];
 	while (1) {
 		nb_rx = rte_eth_rx_burst(port_id, 0, bufs, BURST_SIZE);
 		// ret = rte_ring_enqueue_bulk(tx_ring, bufs, nb_rx, NULL);
@@ -513,15 +511,16 @@ crinkle_rx(
 								  outport, queue_id, nb_rx);
 		}
 	}
+	return -1;
 }
 
-static int
-crinkle_tx(
-	const uint16_t port_id,
-	const uint16_t queue_id) 
-{
-	return 0;
-}
+// static int
+// crinkle_tx(
+// 	const uint16_t port_id,
+// 	const uint16_t queue_id) 
+// {
+// 	return 0;
+// }
 
 /*
  * The lcore main. This is the main thread that does the work, reading from
@@ -754,7 +753,7 @@ main(int argc, char *argv[])
 		rte_exit(EXIT_FAILURE, "Cannot init clone mbuf pool: %s\n", rte_strerror(rte_errno));
 
 	replay_pool = rte_mempool_create("replay_pool", max_replay_size, sizeof(struct replay_buf),
-		max_replay_size / 4, 0, NULL, NULL, NULL, NULL, rte_socket_id(), 0);
+		RTE_MEMPOOL_CACHE_MAX_SIZE, 0, NULL, NULL, NULL, NULL, rte_socket_id(), 0);
 	
 	if (replay_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init replay mbuf pool: %s\n", rte_strerror(rte_errno));
@@ -786,7 +785,6 @@ main(int argc, char *argv[])
 	c_to_tx = rte_malloc("uint8_t", (nb_lcores - 1)*sizeof(uint8_t), 0);
 	tx_to_c = rte_malloc("uint8_t", (nb_lcores - 1)*sizeof(uint8_t), 0);
 	uint16_t portid;
-	uint32_t n_tx_queue;
 	unsigned lcore_id = 0, rx_lcore_id = 0;
 	struct lcore_queue_conf *qconf;
 	struct rte_eth_dev_info dev_info;
@@ -810,6 +808,7 @@ main(int argc, char *argv[])
 	if (1) {
 		struct rte_eth_rxconf rxq_conf;
 		struct rte_eth_conf local_port_conf = port_conf;
+		portid = vport_to_devport[0];
 
 		ret = rte_eth_dev_info_get(portid, &dev_info);
 		if (ret != 0)
@@ -861,6 +860,7 @@ main(int argc, char *argv[])
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%s, port=%d\n",
 				  rte_strerror(-ret), portid);
+		rx_lcore_id++;
 		
 		for (lcore_id = 1; lcore_id < nb_ana_cores + 1; ++lcore_id) {
 			if (rte_lcore_is_enabled(lcore_id) == 0)
@@ -878,6 +878,12 @@ main(int argc, char *argv[])
 			queueid++;
 			rx_lcore_id++;
 		}
+		ret = rte_eth_dev_start(portid);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "rte_eth_dev_start: err=%d, port=%d\n",
+				  ret, portid);
+
+		printf("done:\n");
 	}
 
 	/* Initializing all ports. 8< */
@@ -984,14 +990,10 @@ main(int argc, char *argv[])
 	tsc_hz = rte_get_tsc_hz();
 	printf("Running at %lu hz\n", tsc_hz);
 
-	for (int i = 0; i < qconf->n_rx_queue; ++i) {
-		portid = qconf->rx_queue_list[i];
-		printf(" -- lcoreid=%u portid=%d\n", lcore_id, portid);
-	}
 	uint32_t args[nb_lcores - 1];
 	for (lcore_id = 1; lcore_id <= nb_ana_cores; ++lcore_id) {
 		args[lcore_id - 1] = lcore_id - 1;
-		rte_eal_remote_launch(ana_main, (void *)&args[lcore_id - 1], lcore_id);
+		rte_eal_remote_launch((lcore_function_t *)ana_main, (void *)&args[lcore_id - 1], lcore_id);
 	}
 	for (uint16_t vport = 1; vport < nb_ports; ++vport) {
 		portid = vport_to_devport[vport];
@@ -1001,7 +1003,7 @@ main(int argc, char *argv[])
 			if (rte_lcore_is_enabled(lcore_id) == 0)
 				continue;
 			args[lcore_id - 1] = (portid << 16) | queueid++;
-			rte_eal_remote_launch(crinkle_rx, (void *)&args[lcore_id - 1], lcore_id);
+			rte_eal_remote_launch((lcore_function_t *)crinkle_rx, (void *)&args[lcore_id - 1], lcore_id);
 		}
 	}
 
@@ -1009,7 +1011,7 @@ main(int argc, char *argv[])
 	struct timespec systime;
 	uint64_t systime_ns;
 	unsigned k;
-	int i, j, nb_rx;
+	int i, nb_rx;
 	lcore_id = c_lcore;
 	qconf = &lcore_queue_conf[lcore_id];
 
