@@ -54,7 +54,7 @@ uint64_t mon_id;
 uint16_t nb_ports;
 unsigned nb_lcores, c_lcore, max_replay_size, nb_ana_cores, nb_cores_per_port;
 static struct rte_mempool *packet_pool, *clone_pool, *replay_pool;
-static struct rte_ring *clone_ring, *replay_ring;
+static struct rte_ring *clone_ring, *replay_ring, *tx_rings[MAX_PORTS - 1];
 
 static int rx_queue_per_lcore = 1;
 
@@ -153,40 +153,38 @@ print_ethaddr(const char *name, struct rte_ether_addr *eth_addr)
 	printf("%s%s", name, buf);
 }
 
-/* Send burst of packets on an output interface */
-static void
-send_burst(
-	struct lcore_queue_conf *qconf,
-	const uint16_t outport)
-{
-	struct rte_mbuf **m_table;
-	uint16_t len, queueid;
-	int ret;
+// /* Send burst of packets on an output interface */
+// static void
+// send_burst(
+// 	struct lcore_queue_conf *qconf,
+// 	const uint16_t outport)
+// {
+// 	struct rte_mbuf **m_table;
+// 	uint16_t len, queueid;
+// 	int ret;
 
-	queueid = qconf->tx_queue_id[outport];
-	m_table = (struct rte_mbuf **)qconf->tx_mbufs[outport].m_table;
-	len = qconf->tx_mbufs[outport].len;
+// 	queueid = qconf->tx_queue_id[outport];
+// 	m_table = (struct rte_mbuf **)qconf->tx_mbufs[outport].m_table;
+// 	len = qconf->tx_mbufs[outport].len;
 
-	ret = rte_eth_tx_burst(outport, queueid, m_table, len);
-	while (unlikely (ret < len)) {
-		rte_pktmbuf_free(m_table[ret]);
-		ret++;
-	}
+// 	ret = rte_eth_tx_burst(outport, queueid, m_table, len);
+// 	while (unlikely (ret < len)) {
+// 		rte_pktmbuf_free(m_table[ret]);
+// 		ret++;
+// 	}
 
-	qconf->tx_mbufs[outport].len = 0;
-}
+// 	qconf->tx_mbufs[outport].len = 0;
+// }
 
 static inline void
 send_burst_replayable(
 	struct rte_mbuf **bufs,
-	struct lcore_queue_conf *qconf,
 	const uint64_t systime_ns,
 	const uint64_t copy_replay_start,
 	const uint64_t copy_replay_end,
 	const uint16_t outport,
 	const uint16_t queueid,
-	const uint16_t nb_rx
-)
+	const uint16_t nb_rx)
 {
 	struct replay_buf *rbuf;
 	int reti;
@@ -223,23 +221,23 @@ send_burst_replayable(
 	}
 }
 
-/* Send burst of outgoing packet, if timeout expires. */
-static inline void
-send_timeout_burst(struct lcore_queue_conf *qconf, const uint64_t systime_ns)
-{
-	uint16_t portid;
+// /* Send burst of outgoing packet, if timeout expires. */
+// static inline void
+// send_timeout_burst(struct lcore_queue_conf *qconf, const uint64_t systime_ns)
+// {
+// 	uint16_t portid;
 
-	for (portid = 0; portid < MAX_PORTS; portid++) {
-		if (qconf->tx_mbufs[portid].len != 0) {
-			if (portid == vport_to_devport[0]) {
-				send_burst(qconf, portid);
-			}
-			else {
-				send_burst_replayable(qconf, portid, systime_ns, replay_start, replay_end);
-			}
-		}
-	}
-}
+// 	for (portid = 0; portid < MAX_PORTS; portid++) {
+// 		if (qconf->tx_mbufs[portid].len != 0) {
+// 			if (portid == vport_to_devport[0]) {
+// 				send_burst(qconf, portid);
+// 			}
+// 			else {
+// 				send_burst_replayable(qconf, portid, systime_ns, replay_start, replay_end);
+// 			}
+// 		}
+// 	}
+// }
 
 /* Get the output devport of input vport */
 static inline uint16_t
@@ -259,53 +257,53 @@ get_output_port_from_vport(uint16_t input_port) {
  * 72            80
  * | UID trailer | 80 bytes of header stack |
  */
-static inline void
-crinkle_forward(
-	struct rte_mbuf *buf,
-	struct lcore_queue_conf *qconf,
-	const uint64_t systime_ns,
-	const uint64_t port,
-	const uint64_t copy_replay_start,
-	const uint64_t copy_replay_end)
-{
-	uint16_t len, outport, pkt_size;
-	struct pkt_metadata *pkt;
-	struct tlr_struct uid_trailer = pkt->tlr;
-	const uint32_t *candidate_trailer_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
-	uint32_t candidate_trailer = *candidate_trailer_ptr;
-	uint32_t ts_lower = *(candidate_trailer_ptr-2);
-	uint8_t *trailer = rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16);
+// static inline void
+// crinkle_forward(
+// 	struct rte_mbuf *buf,
+// 	struct lcore_queue_conf *qconf,
+// 	const uint64_t systime_ns,
+// 	const uint64_t port,
+// 	const uint64_t copy_replay_start,
+// 	const uint64_t copy_replay_end)
+// {
+// 	uint16_t len, outport, pkt_size;
+// 	struct pkt_metadata *pkt;
+// 	struct tlr_struct uid_trailer = pkt->tlr;
+// 	const uint32_t *candidate_trailer_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
+// 	uint32_t candidate_trailer = *candidate_trailer_ptr;
+// 	uint32_t ts_lower = *(candidate_trailer_ptr-2);
+// 	uint8_t *trailer = rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16);
 
-	// Build trailer
-	uid_trailer.systime_ns = rte_cpu_to_be_64(systime_ns);
-	uid_trailer.trailer = rte_cpu_to_be_64((mon_id << 48) | (port << 32) | ((uid_trailer.systime_ns << 16) & 0x00000000FFFF0000) | MONPROT);
+// 	// Build trailer
+// 	uid_trailer.systime_ns = rte_cpu_to_be_64(systime_ns);
+// 	uid_trailer.trailer = rte_cpu_to_be_64((mon_id << 48) | (port << 32) | ((uid_trailer.systime_ns << 16) & 0x00000000FFFF0000) | MONPROT);
 
-	// Check for existing UUID trailer
-	if ((candidate_trailer & 0x0000FFFF) != MONPROT || (candidate_trailer >> 16) != (ts_lower & 0x0000FFFF)) {
-		if (unlikely((trailer = (uint8_t *)rte_pktmbuf_append(buf, 16)) == NULL)) {
-			printf("Failed to append trailer to packet");
-			return;
-		}
-		rte_mov16(trailer, (uint8_t *)(&uid_trailer));
-	}
+// 	// Check for existing UUID trailer
+// 	if ((candidate_trailer & 0x0000FFFF) != MONPROT || (candidate_trailer >> 16) != (ts_lower & 0x0000FFFF)) {
+// 		if (unlikely((trailer = (uint8_t *)rte_pktmbuf_append(buf, 16)) == NULL)) {
+// 			printf("Failed to append trailer to packet");
+// 			return;
+// 		}
+// 		rte_mov16(trailer, (uint8_t *)(&uid_trailer));
+// 	}
 
-	pkt->buf = buf;
-	rte_ring_enqueue(clone_ring, &pkt);
+// 	pkt->buf = buf;
+// 	rte_ring_enqueue(clone_ring, &pkt);
 	
-	outport = get_output_port_from_vport(port);
-	len = qconf->tx_mbufs[outport].len;
-	qconf->tx_mbufs[outport].m_table[len] = buf;
-	qconf->tx_mbufs[outport].len = ++len;
-	rte_pktmbuf_refcnt_update(buf, 2);
-	if (unlikely(BURST_SIZE == len))
-		send_burst_replayable(qconf, outport, systime_ns, copy_replay_start, copy_replay_end);
+// 	outport = get_output_port_from_vport(port);
+// 	len = qconf->tx_mbufs[outport].len;
+// 	qconf->tx_mbufs[outport].m_table[len] = buf;
+// 	qconf->tx_mbufs[outport].len = ++len;
+// 	rte_pktmbuf_refcnt_update(buf, 2);
+// 	if (unlikely(BURST_SIZE == len))
+// 		send_burst_replayable(qconf, outport, systime_ns, copy_replay_start, copy_replay_end);
 	
-	// len = qconf->tx_mbufs[vport_to_devport[0]].len;
-	// qconf->tx_mbufs[vport_to_devport[0]].m_table[len] = cbuf;
-	// qconf->tx_mbufs[vport_to_devport[0]].len = ++len;
-	// if (unlikely(BURST_SIZE == len))
-	//  	send_burst(qconf, vport_to_devport[0]);
-}
+// 	// len = qconf->tx_mbufs[vport_to_devport[0]].len;
+// 	// qconf->tx_mbufs[vport_to_devport[0]].m_table[len] = cbuf;
+// 	// qconf->tx_mbufs[vport_to_devport[0]].len = ++len;
+// 	// if (unlikely(BURST_SIZE == len))
+// 	//  	send_burst(qconf, vport_to_devport[0]);
+// }
 
 static inline void
 crinkle_process_burst(
@@ -313,8 +311,7 @@ crinkle_process_burst(
 	struct pkt_metadata **pkts,
 	const uint16_t nb_rx,
 	const uint64_t systime_ns,
-	const uint64_t port
-)
+	const uint64_t port)
 {
 	struct rte_mbuf *buf;
 	struct pkt_metadata *pkt;
@@ -350,8 +347,8 @@ static inline void
 ana_clone_and_tx(
 	struct pkt_metadata **pkts,
 	struct rte_mbuf **cbufs,
-	struct lcore_queue_conf *qconf
-) 
+	const uint16_t outport,
+	const uint16_t queue_id) 
 {
 	struct rte_mbuf *buf, *cbuf;
 	struct tlr_struct uid_trailer;
@@ -360,30 +357,30 @@ ana_clone_and_tx(
 	uint16_t i, pkt_size, queueid, outport;
 	nb_deq = rte_ring_dequeue_bulk(clone_ring, pkts, BURST_SIZE, NULL);
 
-	for (i = 0; i < nb_deq; ++i) {
-		buf = pkts[i]->buf;
-		uid_trailer = pkts[i]->tlr;
-		cbuf = cbufs[i];
-		if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
-			return;
+	if (nb_deq > 0) {
+		for (i = 0; i < nb_deq; ++i) {
+			buf = pkts[i]->buf;
+			uid_trailer = pkts[i]->tlr;
+			cbuf = cbufs[i];
+			if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
+				return;
+			}
+			if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
+				printf("Failed to prepend clone packet");
+				rte_pktmbuf_free(cbuf);
+				return;
+			}
+			pkt_size = rte_cpu_to_be_16(buf->data_len);
+			rte_mov64(c, ana_headers);
+			rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
+			rte_mov16(c+56, (uint8_t *)(&uid_trailer));
+			rte_mov16(c+72, rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16));
 		}
-		if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
-			printf("Failed to prepend clone packet");
-			rte_pktmbuf_free(cbuf);
-			return;
-		}
-		pkt_size = rte_cpu_to_be_16(buf->data_len);
-		rte_mov64(c, ana_headers);
-		rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
-		rte_mov16(c+56, (uint8_t *)(&uid_trailer));
-		rte_mov16(c+72, rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16));
-	}
 
-	outport = vport_to_devport[0];
-	queueid = qconf->tx_queue_id[outport];
-	nb_tx = rte_eth_tx_burst(outport, queueid, cbufs, nb_deq);
-	if (unlikely(nb_tx < nb_deq)) {
-		rte_pktmbuf_free_bulk(&cbufs[nb_tx], nb_deq - nb_tx);
+		nb_tx = rte_eth_tx_burst(outport, queueid, cbufs, nb_deq);
+		if (unlikely(nb_tx < nb_deq)) {
+			rte_pktmbuf_free_bulk(&cbufs[nb_tx], nb_deq - nb_tx);
+		}
 	}
 }
 
@@ -391,8 +388,7 @@ static inline void
 run_replay(
 	struct lcore_queue_conf *qconf,
 	const uint16_t port,
-	const uint64_t start_time
-)
+	const uint64_t start_time)
 {
 	if (unlikely(qconf->buf_mbufs[port].len == 0)) return;
 	uint32_t ptr = 0;
@@ -476,7 +472,54 @@ crinkle_command_handler(
 }
 
 static int
-ana_main(__rte_unused void *dummy) {
+ana_main(
+	const uint32_t arg) 
+{
+	struct pkt_metadata *pkts[BURST_SIZE];
+	struct rte_mbuf *cbufs[BURST_SIZE];
+	const uint16_t queue_id = (uint16_t)(arg & 0xFFFF);
+	const uint16_t outport = get_output_port_from_vport(0);
+	ana_clone_and_tx(pkts, cbufs, outport, queue_id);
+}
+
+static int
+crinkle_rx(
+	const uint32_t arg)
+{
+	struct rte_mbuf *bufs[BURST_SIZE];
+	struct pkt_metadata *pkts[BURST_SIZE];
+	struct timespec ts;
+	uint64_t systime_ns;
+	int nb_rx, ret;
+	uint16_t i, k;
+	const unsigned lcore_id = rte_lcore_id();
+	const uint16_t port_id = (uint16_t)(arg >> 16);
+	const uint16_t queue_id = (uint16_t)(arg & 0xFFFF);
+	const uint16_t vport = devport_to_vport[port_id];
+	const uint16_t outport = get_output_port_from_vport(vport);
+	struct rte_ring *tx_ring = tx_rings[vport - 1];
+	while (1) {
+		nb_rx = rte_eth_rx_burst(port_id, 0, bufs, BURST_SIZE);
+		// ret = rte_ring_enqueue_bulk(tx_ring, bufs, nb_rx, NULL);
+		// if (unlikely(ret < nb_rx)) {
+		// 	rte_pktmbuf_free_bulk(&bufs[ret], nb_rx - ret);
+		// 	printf("TX ring for port %hu full, dropped %d packets\n", vport, nb_rx - ret);
+		// }
+		if (nb_rx > 0) {
+			clock_gettime(CLOCK_REALTIME, &ts);
+			systime_ns = timespec64_to_ns(&ts);
+			crinkle_process_burst(bufs, pkts, nb_rx, systime_ns, port_id);
+			send_burst_replayable(bufs, systime_ns, replay_start, replay_end,
+								  outport, queue_id, nb_rx);
+		}
+	}
+}
+
+static int
+crinkle_tx(
+	const uint16_t port_id,
+	const uint16_t queue_id) 
+{
 	return 0;
 }
 
@@ -486,82 +529,82 @@ ana_main(__rte_unused void *dummy) {
  */
 
  /* Basic forwarding application lcore. 8< */
-static int
-lcore_main(__rte_unused void *dummy)
-{
-	struct rte_mbuf *bufs[BURST_SIZE];
-	unsigned lcore_id, k;
-	int i, j, nb_rx;
-	uint16_t portid;
-	struct lcore_queue_conf *qconf;
+// static int
+// lcore_main(__rte_unused void *dummy)
+// {
+// 	struct rte_mbuf *bufs[BURST_SIZE];
+// 	unsigned lcore_id, k;
+// 	int i, j, nb_rx;
+// 	uint16_t portid;
+// 	struct lcore_queue_conf *qconf;
 
-	lcore_id = rte_lcore_id();
-	qconf = &lcore_queue_conf[lcore_id];
+// 	lcore_id = rte_lcore_id();
+// 	qconf = &lcore_queue_conf[lcore_id];
 
-	if (qconf->n_rx_queue == 0) {
-		printf("lcore %u has nothing to do\n",lcore_id);
-		return 0;
-	}
+// 	if (qconf->n_rx_queue == 0) {
+// 		printf("lcore %u has nothing to do\n",lcore_id);
+// 		return 0;
+// 	}
 
-	/* Main work of application loop. 8< */
-	struct timespec systime;
-	uint64_t systime_ns;
-	uint64_t last_burst_ns = 0;
+// 	/* Main work of application loop. 8< */
+// 	struct timespec systime;
+// 	uint64_t systime_ns;
+// 	uint64_t last_burst_ns = 0;
 
-	for (i = 0; i < qconf->n_rx_queue; ++i) {
-		portid = qconf->rx_queue_list[i];
-		printf(" -- lcoreid=%u portid=%d\n", lcore_id, portid);
-	}
+// 	for (i = 0; i < qconf->n_rx_queue; ++i) {
+// 		portid = qconf->rx_queue_list[i];
+// 		printf(" -- lcoreid=%u portid=%d\n", lcore_id, portid);
+// 	}
 
-	uint32_t ctr_max = 10000000;
+// 	uint32_t ctr_max = 10000000;
 
-	while (1) {
-		nb_rx = rte_eth_rx_burst(portid, 0, bufs, BURST_SIZE);
+// 	while (1) {
+// 		nb_rx = rte_eth_rx_burst(portid, 0, bufs, BURST_SIZE);
 		
-		for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; ++j) {
-			rte_prefetch0(rte_pktmbuf_mtod(bufs[j], void *));
-		}
+// 		for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; ++j) {
+// 			rte_prefetch0(rte_pktmbuf_mtod(bufs[j], void *));
+// 		}
 
-		for (j = 0; j < (nb_rx - PREFETCH_OFFSET); ++j) {
-			rte_prefetch0(rte_pktmbuf_mtod(bufs[j + PREFETCH_OFFSET], void *));
-			crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
-							replay_start, replay_end);
-		}
+// 		for (j = 0; j < (nb_rx - PREFETCH_OFFSET); ++j) {
+// 			rte_prefetch0(rte_pktmbuf_mtod(bufs[j + PREFETCH_OFFSET], void *));
+// 			crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
+// 							replay_start, replay_end);
+// 		}
 
-		/* Forward remaining prefetched packets */
-		for (; j < nb_rx; ++j) {
-			crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
-							replay_start, replay_end);
-		}
+// 		/* Forward remaining prefetched packets */
+// 		for (; j < nb_rx; ++j) {
+// 			crinkle_forward(bufs[j], qconf, systime_ns++, devport_to_vport[portid],
+// 							replay_start, replay_end);
+// 		}
 
-		/* Send out packets from TX queues */
-		if (unlikely(systime_ns - last_burst_ns >= BURST_TX_DRAIN_US*1000)) {
-			send_timeout_burst(qconf, systime_ns);
-			last_burst_ns = systime_ns;
-		}
+// 		/* Send out packets from TX queues */
+// 		if (unlikely(systime_ns - last_burst_ns >= BURST_TX_DRAIN_US*1000)) {
+// 			send_timeout_burst(qconf, systime_ns);
+// 			last_burst_ns = systime_ns;
+// 		}
 
-		if (c_to_tx[lcore_id] & TYPE_REPLAY_CLEAR) {
-			for (i = 0; i < nb_ports; ++i) {
-				if (qconf->buf_mbufs[i].len == 0) continue;
-				for (k = 0; k < qconf->buf_mbufs[i].len; ++k) {
-					// double free since the refcnt will be at +2
-					rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[k].m_table, qconf->buf_mbufs[i].m_lens[k]);
-					rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[k].m_table, qconf->buf_mbufs[i].m_lens[k]);
-					qconf->buf_mbufs[i].m_lens[k] = 0;
-				}
-				qconf->buf_mbufs[i].len = 0;
-			}
-			tx_to_c[lcore_id] |= TYPE_REPLAY_CLEAR;
-			c_to_tx[lcore_id] &= ~TYPE_REPLAY_CLEAR;
-		}
-		else if (c_to_tx[lcore_id] & TYPE_REPLAY_RUN) {
-			run_replay(qconf, get_output_port_from_vport(devport_to_vport[portid]), replay_run_start);
-			tx_to_c[lcore_id] |= TYPE_REPLAY_RUN;
-			c_to_tx[lcore_id] &= ~TYPE_REPLAY_RUN;
-		}
-	}
-	/* >8 End of loop. */
-}
+// 		if (c_to_tx[lcore_id] & TYPE_REPLAY_CLEAR) {
+// 			for (i = 0; i < nb_ports; ++i) {
+// 				if (qconf->buf_mbufs[i].len == 0) continue;
+// 				for (k = 0; k < qconf->buf_mbufs[i].len; ++k) {
+// 					// double free since the refcnt will be at +2
+// 					rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[k].m_table, qconf->buf_mbufs[i].m_lens[k]);
+// 					rte_pktmbuf_free_bulk(qconf->buf_mbufs[i].m_tables[k].m_table, qconf->buf_mbufs[i].m_lens[k]);
+// 					qconf->buf_mbufs[i].m_lens[k] = 0;
+// 				}
+// 				qconf->buf_mbufs[i].len = 0;
+// 			}
+// 			tx_to_c[lcore_id] |= TYPE_REPLAY_CLEAR;
+// 			c_to_tx[lcore_id] &= ~TYPE_REPLAY_CLEAR;
+// 		}
+// 		else if (c_to_tx[lcore_id] & TYPE_REPLAY_RUN) {
+// 			run_replay(qconf, get_output_port_from_vport(devport_to_vport[portid]), replay_run_start);
+// 			tx_to_c[lcore_id] |= TYPE_REPLAY_RUN;
+// 			c_to_tx[lcore_id] &= ~TYPE_REPLAY_RUN;
+// 		}
+// 	}
+// 	/* >8 End of loop. */
+// }
 /* >8 End Basic forwarding application lcore. */
 
 
@@ -726,14 +769,13 @@ main(int argc, char *argv[])
 	if (replay_ring == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot create replay ring: %s\n", rte_strerror(rte_errno));
 
-	struct rte_ring *tx_rings[nb_ports - 1];
-	for (uint16_t i = 0; i < nb_ports - 1; ++i) {
-		char ring_name[32];
-		snprintf(ring_name, 32, "tx_ring_%d", i);
-		tx_rings[i] = rte_ring_create(ring_name, NUM_MBUFS, rte_socket_id(), RING_F_MP_HTS_ENQ | RING_F_MC_HTS_DEQ);
-		if (tx_rings[i] == NULL)
-			rte_exit(EXIT_FAILURE, "Cannot create tx ring %d: %s\n", i, rte_strerror(rte_errno));
-	}
+	// for (uint16_t i = 0; i < nb_ports - 1; ++i) {
+	// 	char ring_name[32];
+	// 	snprintf(ring_name, 32, "tx_ring_%d", i);
+	// 	tx_rings[i] = rte_ring_create(ring_name, NUM_MBUFS, rte_socket_id(), RING_F_MP_HTS_ENQ | RING_F_MC_HTS_DEQ);
+	// 	if (tx_rings[i] == NULL)
+	// 		rte_exit(EXIT_FAILURE, "Cannot create tx ring %d: %s\n", i, rte_strerror(rte_errno));
+	// }
 
 	nb_lcores = rte_lcore_count();
 	nb_ana_cores = 1;
@@ -780,7 +822,6 @@ main(int argc, char *argv[])
 			local_port_conf.rxmode.mtu);
 
 		c_lcore = 0;
-		qconf = &lcore_queue_conf[c_lcore];
 		printf("Initializing port %d on lcore %u... ", portid,
 			rx_lcore_id);
 		fflush(stdout);
@@ -790,9 +831,6 @@ main(int argc, char *argv[])
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "Cannot configure device: err=%s, port=%d\n",
 				 rte_strerror(-ret), portid);
-
-		qconf->rx_queue_list[qconf->n_rx_queue] = portid;
-		qconf->n_rx_queue++;
 
 		ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd,
 						       &nb_txd);
@@ -824,7 +862,7 @@ main(int argc, char *argv[])
 			rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%s, port=%d\n",
 				  rte_strerror(-ret), portid);
 		
-		for (lcore_id = 1; lcore_id <= nb_ana_cores; ++lcore_id) {
+		for (lcore_id = 1; lcore_id < nb_ana_cores + 1; ++lcore_id) {
 			if (rte_lcore_is_enabled(lcore_id) == 0)
 				continue;
 			printf("txq=%u,%hu ", lcore_id, queueid);
@@ -837,19 +875,16 @@ main(int argc, char *argv[])
 			if (ret < 0)
 				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%s, "
 					  "port=%d\n", rte_strerror(-ret), portid);
-
-			qconf = &lcore_queue_conf[lcore_id];
-			qconf->tx_queue_id[portid] = queueid;
-			qconf->buf_queue_id[portid] = queueid;
 			queueid++;
+			rx_lcore_id++;
 		}
 	}
 
 	/* Initializing all ports. 8< */
-	RTE_ETH_FOREACH_DEV(portid) {
-		if (portid == vport_to_devport[0]) continue;
+	for (uint16_t vport = 1; vport < nb_ports; ++vport) {
 		struct rte_eth_rxconf rxq_conf;
 		struct rte_eth_conf local_port_conf = port_conf;
+		portid = vport_to_devport[vport];
 
 		/* limit the frame size to the maximum supported by NIC */
 		ret = rte_eth_dev_info_get(portid, &dev_info);
@@ -863,11 +898,9 @@ main(int argc, char *argv[])
 		    local_port_conf.rxmode.mtu);
 			
 		/* get the lcore_id for this port */
-		while (rte_lcore_is_enabled(rx_lcore_id) == 0 ||
-			qconf->n_rx_queue == (unsigned)rx_queue_per_lcore) {
+		while (rte_lcore_is_enabled(rx_lcore_id) == 0) {
 
 			rx_lcore_id ++;
-			qconf = &lcore_queue_conf[rx_lcore_id];
 
 			if (rx_lcore_id >= RTE_MAX_LCORE)
 				rte_exit(EXIT_FAILURE, "Not enough cores\n");
@@ -880,9 +913,6 @@ main(int argc, char *argv[])
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%d\n",
 					ret, portid);
-
-		qconf->rx_queue_list[qconf->n_rx_queue] = portid;
-		qconf->n_rx_queue++;
 
 		/* init port */
 
@@ -918,8 +948,8 @@ main(int argc, char *argv[])
 
 		/* init one TX queue per couple (lcore,port) */
 		queueid = 0;
-
-		RTE_LCORE_FOREACH(lcore_id) {
+		const unsigned lcore_max = (1 + nb_ana_cores + (nb_cores_per_port * vport));
+		for(; lcore_id < lcore_max; ++lcore_id) {
 			if (rte_lcore_is_enabled(lcore_id) == 0)
 				continue;
 			printf("txq=%u,%hu ", lcore_id, queueid);
@@ -930,17 +960,10 @@ main(int argc, char *argv[])
 			ret = rte_eth_tx_queue_setup(portid, queueid, nb_txd,
 						     rte_lcore_to_socket_id(lcore_id), txconf);
 			if (ret < 0)
-				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%d, "
-					  "port=%d\n", ret, portid);
-
-			qconf = &lcore_queue_conf[lcore_id];
-			qconf->tx_queue_id[portid] = queueid;
-			qconf->buf_queue_id[portid] = queueid;
-
-			qconf->buf_mbufs[portid].tsc_counts = rte_malloc("uint64_t", max_replay_size*sizeof(uint64_t), 0);
-			qconf->buf_mbufs[portid].m_lens = rte_malloc("uint16_t", max_replay_size*sizeof(uint16_t), 0);
-			qconf->buf_mbufs[portid].m_tables = rte_malloc("mbuf_table_light", max_replay_size*sizeof(struct mbuf_table_light), 0);
+				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%s, "
+					  "port=%d\n", rte_strerror(-ret), portid);
 			queueid++;
+			rx_lcore_id++;
 		}
 
 		ret = rte_eth_promiscuous_enable(portid);
@@ -965,12 +988,21 @@ main(int argc, char *argv[])
 		portid = qconf->rx_queue_list[i];
 		printf(" -- lcoreid=%u portid=%d\n", lcore_id, portid);
 	}
-
+	uint32_t args[nb_lcores - 1];
 	for (lcore_id = 1; lcore_id <= nb_ana_cores; ++lcore_id) {
-		rte_eal_remote_launch(ana_main, NULL, lcore_id);
+		args[lcore_id - 1] = lcore_id - 1;
+		rte_eal_remote_launch(ana_main, (void *)&args[lcore_id - 1], lcore_id);
 	}
-	for (; lcore_id < nb_lcores; ++lcore_id) {
-		rte_eal_remote_launch(lcore_main, NULL< lcore_id);
+	for (uint16_t vport = 1; vport < nb_ports; ++vport) {
+		portid = vport_to_devport[vport];
+		const unsigned lcore_max = (1 + nb_ana_cores + (nb_cores_per_port * vport));
+		uint16_t queueid = 0;
+		for(; lcore_id < lcore_max; ++lcore_id) {
+			if (rte_lcore_is_enabled(lcore_id) == 0)
+				continue;
+			args[lcore_id - 1] = (portid << 16) | queueid++;
+			rte_eal_remote_launch(crinkle_rx, (void *)&args[lcore_id - 1], lcore_id);
+		}
 	}
 
 	struct rte_mbuf *bufs[BURST_SIZE];
