@@ -321,24 +321,23 @@ crinkle_process_burst(
 	for (i = 0; i < nb_rx; ++i) {
 		buf = bufs[i];
 		pkt = pkts[i];
-		struct tlr_struct uid_trailer = pkt->tlr;
 		cand_tlr_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
 		ts_lower = *(cand_tlr_ptr - 2);
-		uid_trailer.systime_ns = rte_cpu_to_be_64(systime_ns);
-		uid_trailer.trailer = rte_cpu_to_be_64((mon_id << 48) | (port << 32) | ((uid_trailer.systime_ns << 16) & 0x00000000FFFF0000) | MONPROT);
+		pkt->tlr.systime_ns = rte_cpu_to_be_64(systime_ns);
+		pkt->tlr.trailer = rte_cpu_to_be_64((mon_id << 48) | (port << 32) | ((pkt->tlr.systime_ns << 16) & 0x00000000FFFF0000) | MONPROT);
 
 		// Check for existing UUID trailer
 		if ((*cand_tlr_ptr & 0x0000FFFF) != MONPROT || (*cand_tlr_ptr >> 16) != (ts_lower & 0x0000FFFF)) {
 			if (unlikely((tlr = (uint8_t *)rte_pktmbuf_append(buf, 16)) == NULL)) {
-				printf("Failed to append trailer to packet");
+				printf("Failed to append trailer to packet\n");
 				return;
 			}
-			rte_mov16(tlr, (uint8_t *)(&uid_trailer));
+			rte_mov16(tlr, (uint8_t *)(&pkt->tlr));
 		}
 
-		rte_pktmbuf_refcnt_update(buf, 2);
+		rte_pktmbuf_refcnt_update(buf, 3);
 		pkt->buf = buf;
-		rte_ring_enqueue(clone_ring, &pkt);
+		rte_ring_enqueue(clone_ring, pkt);
 	}
 }
 
@@ -354,29 +353,33 @@ ana_clone_and_tx(
 	uint8_t *c;
 	unsigned nb_deq, nb_tx;
 	uint16_t i, pkt_size;
-	nb_deq = rte_ring_dequeue_bulk(clone_ring, (void **)pkts, BURST_SIZE, NULL);
+	nb_deq = rte_ring_dequeue_burst(clone_ring, (void **)pkts, BURST_SIZE, NULL);
 
 	if (nb_deq > 0) {
 		for (i = 0; i < nb_deq; ++i) {
 			buf = pkts[i]->buf;
 			uid_trailer = pkts[i]->tlr;
-			cbuf = cbufs[i];
 			if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
-				return;
+				printf("Failed to clone packet for analyzer\n");
+				rte_pktmbuf_free(buf);
+				continue;
 			}
+			rte_pktmbuf_free(buf);
 			if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
-				printf("Failed to prepend clone packet");
+				printf("Failed to prepend clone packet\n");
 				rte_pktmbuf_free(cbuf);
-				return;
+				continue;
 			}
 			pkt_size = rte_cpu_to_be_16(buf->data_len);
 			rte_mov64(c, ana_headers);
 			rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
 			rte_mov16(c+56, (uint8_t *)(&uid_trailer));
 			rte_mov16(c+72, rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16));
+			cbufs[i] = cbuf;
 		}
 
 		nb_tx = rte_eth_tx_burst(outport, queue_id, cbufs, nb_deq);
+		rte_pktmbuf_free(buf);
 		if (unlikely(nb_tx < nb_deq)) {
 			rte_pktmbuf_free_bulk(&cbufs[nb_tx], nb_deq - nb_tx);
 		}
@@ -478,7 +481,7 @@ ana_main(
 	struct rte_mbuf *cbufs[BURST_SIZE];
 	uint16_t i;
 	const uint16_t queue_id = (uint16_t)(*(uint32_t *)arg & 0xFFFF);
-	const uint16_t outport = get_output_port_from_vport(0);
+	const uint16_t outport = vport_to_devport[0];
 
 	for (i = 0; i < BURST_SIZE; ++i) {
 		pkts[i] = rte_zmalloc(NULL, sizeof(struct pkt_metadata), 0);
@@ -487,7 +490,9 @@ ana_main(
 		}
 	}
 
-	ana_clone_and_tx(pkts, cbufs, outport, queue_id);
+	while (1) {
+		ana_clone_and_tx(pkts, cbufs, outport, queue_id);
+	}
 	return 0;
 }
 
