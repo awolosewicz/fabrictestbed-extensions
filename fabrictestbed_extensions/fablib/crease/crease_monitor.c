@@ -476,8 +476,17 @@ ana_main(
 {
 	struct pkt_metadata *pkts[BURST_SIZE];
 	struct rte_mbuf *cbufs[BURST_SIZE];
+	uint16_t i;
 	const uint16_t queue_id = (uint16_t)(*(uint32_t *)arg & 0xFFFF);
 	const uint16_t outport = get_output_port_from_vport(0);
+
+	for (i = 0; i < BURST_SIZE; ++i) {
+		pkts[i] = rte_zmalloc(NULL, sizeof(struct pkt_metadata), 0);
+		if (pkts[i] == NULL) {
+			rte_exit(EXIT_FAILURE, "Failed to allocate memory for packet metadata\n");
+		}
+	}
+
 	ana_clone_and_tx(pkts, cbufs, outport, queue_id);
 	return 0;
 }
@@ -491,11 +500,20 @@ crinkle_rx(
 	struct timespec ts;
 	uint64_t systime_ns;
 	int nb_rx;
+	uint16_t i;
 	const uint16_t port_id = (uint16_t)(*(uint32_t *)arg >> 16);
 	const uint16_t queue_id = (uint16_t)(*(uint32_t *)arg & 0xFFFF);
 	const uint16_t vport = devport_to_vport[port_id];
 	const uint16_t outport = get_output_port_from_vport(vport);
 	//struct rte_ring *tx_ring = tx_rings[vport - 1];
+
+	for (i = 0; i < BURST_SIZE; ++i) {
+		pkts[i] = rte_zmalloc(NULL, sizeof(struct pkt_metadata), 0);
+		if (pkts[i] == NULL) {
+			rte_exit(EXIT_FAILURE, "Failed to allocate memory for packet metadata\n");
+		}
+	}
+
 	while (1) {
 		nb_rx = rte_eth_rx_burst(port_id, 0, bufs, BURST_SIZE);
 		// ret = rte_ring_enqueue_bulk(tx_ring, bufs, nb_rx, NULL);
