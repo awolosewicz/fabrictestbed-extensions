@@ -356,7 +356,7 @@ crinkle_process_burst(
 		pkts[i] = pkt;
 		//rte_ring_enqueue_elem(clone_ring, &pkt, sizeof(struct pkt_metadata));
 	}
-	rte_ring_enqueue_bulk_elem(clone_ring, pkts, sizeof(struct pkt_metadata), nb_rx, NULL);
+	//rte_ring_enqueue_bulk_elem(clone_ring, pkts, sizeof(struct pkt_metadata), nb_rx, NULL);
 	//printf("%lu - %u: %s\n", port, nb_rx, testout);
 }
 
@@ -450,6 +450,7 @@ crinkle_rx(
 			crinkle_process_burst(bufs, pkts, nb_rx, systime_ns, port_id);
 			send_burst_replayable(bufs, systime_ns, replay_start, replay_end,
 								  outport, queue_id, nb_rx);
+			rte_ring_enqueue_bulk_elem(clone_ring, pkts, sizeof(struct pkt_metadata), nb_rx, NULL);
 		}
 	}
 
@@ -588,13 +589,13 @@ main(int argc, char *argv[])
 	}
 	printf("Maximum replay size: %u\n", max_replay_size);
 
-	packet_pool = rte_pktmbuf_pool_create("packet_pool", (max_replay_size+256)*BURST_SIZE, MBUF_CACHE_SIZE,
+	packet_pool = rte_pktmbuf_pool_create("packet_pool", (max_replay_size+256)*BURST_SIZE, RTE_MEMPOOL_CACHE_MAX_SIZE,
 		0, PKT_MBUF_DATA_SIZE, rte_socket_id());
 
 	if (packet_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init packet mbuf pool: %s\n", rte_strerror(rte_errno));
 
-	clone_pool = rte_pktmbuf_pool_create("clone_pool", NUM_MBUFS , MBUF_CACHE_SIZE,
+	clone_pool = rte_pktmbuf_pool_create("clone_pool", NUM_MBUFS , RTE_MEMPOOL_CACHE_MAX_SIZE,
 		0, 0, rte_socket_id());
 
 	if (clone_pool == NULL)
