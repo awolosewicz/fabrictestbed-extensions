@@ -59,8 +59,8 @@ static struct rte_ring *clone_ring, *replay_ring;
 
 //static int rx_queue_per_lcore = 1;
 
-#define RX_RING_SIZE 1024
-#define TX_RING_SIZE 4096
+#define RX_RING_SIZE 2048
+#define TX_RING_SIZE 8192
 static uint16_t nb_rxd = RX_RING_SIZE;
 static uint16_t nb_txd = TX_RING_SIZE;
 static struct rte_ether_addr ports_eth_addr[MAX_PORTS];
@@ -118,6 +118,7 @@ struct lcore_args {
 	uint16_t port_id;
 	uint16_t queue_id;
 };
+static struct lcore_args args[RTE_MAX_LCORE];
 
 static inline uint64_t
 extract_long(uint8_t* ptr)
@@ -139,8 +140,8 @@ extract_long(uint8_t* ptr)
 #define IDX_REPLAY_CLEAR (uint8_t)1
 #define IDX_REPLAY_RUN (uint8_t)2
 bool do_run = true;
-uint8_t *c_to_tx;
-uint8_t *tx_to_c;
+uint8_t c_to_tx[RTE_MAX_LCORE];
+uint8_t tx_to_c[RTE_MAX_LCORE];
 uint16_t c_ctrs[8];
 uint64_t replay_start = 0;
 uint64_t replay_end = 0;
@@ -414,6 +415,7 @@ ana_main(
 	const struct lcore_args *arg = (const struct lcore_args *)void_arg;
 	const uint16_t queue_id = arg->queue_id;
 	const uint16_t outport = vport_to_devport[0];
+	printf("Starting analyzer tx on port %hu, queue %hu\n", outport, queue_id);
 
 	while (do_run) {
 		ana_clone_and_tx(pkts, bufs, cbufs, outport, queue_id);
@@ -430,9 +432,11 @@ crinkle_rx(
 	struct timespec ts;
 	uint64_t systime_ns, tsc_start, current_tsc, ns_per_tsc;
 	int nb_rx;
+	unsigned nb_free = NUM_MBUFS;
 	const struct lcore_args *arg = (const struct lcore_args *)void_arg;
 	const uint16_t port_id = arg->port_id;
 	const uint16_t queue_id = arg->queue_id;
+	printf("Starting crinkle on port %hu, queue %hu\n", port_id, queue_id);
 	const uint16_t vport = devport_to_vport[port_id];
 	const uint16_t outport = get_output_port_from_vport(vport);
 
@@ -450,7 +454,13 @@ crinkle_rx(
 			crinkle_process_burst(bufs, pkts, nb_rx, systime_ns, port_id);
 			send_burst_replayable(bufs, systime_ns, replay_start, replay_end,
 								  outport, queue_id, nb_rx);
-			rte_ring_enqueue_bulk_elem(clone_ring, pkts, sizeof(struct pkt_metadata), nb_rx, NULL);
+			for (unsigned i = 0; i < nb_rx; ++i) {
+				if (pkts[i].buf == NULL) printf("NULL packet in pkts at %u\n", i);
+			}
+			rte_ring_enqueue_bulk_elem(clone_ring, pkts, sizeof(struct pkt_metadata), nb_rx, &nb_free);
+			if (unlikely(nb_free < (NUM_MBUFS / 8))) {
+				printf("Clone ring getting full, free space %d\n", nb_free);
+			}
 		}
 	}
 
@@ -576,7 +586,7 @@ main(int argc, char *argv[])
 	}
 	for (uint16_t i = 0; i < nb_ports; ++i) {
 		if (vport_to_devport[i] >= nb_ports) {
-			rte_exit(EXIT_FAILURE, "Invalid port mapping for virtual port %hu: %hu.\n", i, vport_to_devport[i]);
+			rte_exit(EXIT_FAILURE, "Invalid port mapping for virtual port %hu: %hu beyond %hu.\n", i, vport_to_devport[i], nb_ports);
 		}
 	}
 	if (max_replay_size < MIN_REPLAY_SIZE) max_replay_size = MIN_REPLAY_SIZE;
@@ -623,10 +633,8 @@ main(int argc, char *argv[])
 	if (nb_cores_per_port == 0) {
 		rte_exit(EXIT_FAILURE, "Not enough cores, need at least %u\n", (nb_ports - 1 + nb_ana_cores + 1));
 	}
-	c_to_tx = rte_malloc("uint8_t", (nb_lcores - 1)*sizeof(uint8_t), 0);
-	tx_to_c = rte_malloc("uint8_t", (nb_lcores - 1)*sizeof(uint8_t), 0);
 	uint16_t portid;
-	unsigned lcore_id = 0, rx_lcore_id = 0;
+	unsigned lcore_id = 0, nb_lcores = 0;
 	struct lcore_queue_conf *qconf;
 	struct rte_eth_dev_info dev_info;
 	struct rte_eth_txconf *txconf;
@@ -662,8 +670,18 @@ main(int argc, char *argv[])
 			local_port_conf.rxmode.mtu);
 
 		c_lcore = 0;
+
+		while (rte_lcore_is_enabled(lcore_id) == 0) {
+
+			lcore_id++;
+
+			if (lcore_id >= RTE_MAX_LCORE)
+				rte_exit(EXIT_FAILURE, "Not enough cores\n");
+		}
+		c_lcore = lcore_id;
+
 		printf("Initializing port %d on lcore %u... ", portid,
-			rx_lcore_id);
+			lcore_id);
 		fflush(stdout);
 
 		ret = rte_eth_dev_configure(portid, 1, nb_ana_cores,
@@ -701,23 +719,27 @@ main(int argc, char *argv[])
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%s, port=%d\n",
 				  rte_strerror(-ret), portid);
-		rx_lcore_id++;
-		
-		for (lcore_id = 1; lcore_id < nb_ana_cores + 1; ++lcore_id) {
-			if (rte_lcore_is_enabled(lcore_id) == 0)
+
+		lcore_id++;
+		nb_lcores = 0;
+		while (nb_lcores < nb_ana_cores) {
+			if (rte_lcore_is_enabled(lcore_id) == 0) {
+				lcore_id++;
 				continue;
+			}
 			printf("txq=%u,%hu ", lcore_id, queueid);
 			fflush(stdout);
 
 			txconf = &dev_info.default_txconf;
 			//printf("txconf offloads: 0x%" PRIx64 "\n", txconf->offloads);
-			ret = rte_eth_tx_queue_setup(portid, queueid, nb_txd,
+			ret = rte_eth_tx_queue_setup(portid, queueid, nb_txd / nb_ana_cores,
 						     rte_lcore_to_socket_id(lcore_id), txconf);
 			if (ret < 0)
 				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%s, "
 					  "port=%d\n", rte_strerror(-ret), portid);
 			queueid++;
-			rx_lcore_id++;
+			lcore_id++;
+			nb_lcores++;
 		}
 		ret = rte_eth_dev_start(portid);
 		if (ret < 0)
@@ -745,15 +767,15 @@ main(int argc, char *argv[])
 		    local_port_conf.rxmode.mtu);
 			
 		/* get the lcore_id for this port */
-		while (rte_lcore_is_enabled(rx_lcore_id) == 0) {
+		while (rte_lcore_is_enabled(lcore_id) == 0) {
 
-			rx_lcore_id ++;
+			lcore_id++;
 
-			if (rx_lcore_id >= RTE_MAX_LCORE)
+			if (lcore_id >= RTE_MAX_LCORE)
 				rte_exit(EXIT_FAILURE, "Not enough cores\n");
 		}
 		printf("Initializing port %d on lcore %u... ", portid,
-			rx_lcore_id);
+			lcore_id);
 		fflush(stdout);
 		ret = rte_eth_dev_configure(portid, 1, nb_cores_per_port,
 					&local_port_conf);
@@ -795,10 +817,13 @@ main(int argc, char *argv[])
 
 		/* init one TX queue per couple (lcore,port) */
 		queueid = 0;
-		const unsigned lcore_max = (1 + nb_ana_cores + (nb_cores_per_port * vport));
-		for(; lcore_id < lcore_max; ++lcore_id) {
-			if (rte_lcore_is_enabled(lcore_id) == 0)
+		nb_lcores = 0;
+		fflush(stdout);
+		while (nb_lcores < nb_cores_per_port) {
+			if (rte_lcore_is_enabled(lcore_id) == 0){
+				lcore_id++;
 				continue;
+			}
 			printf("txq=%u,%hu ", lcore_id, queueid);
 			fflush(stdout);
 
@@ -810,7 +835,8 @@ main(int argc, char *argv[])
 				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%s, "
 					  "port=%d\n", rte_strerror(-ret), portid);
 			queueid++;
-			rx_lcore_id++;
+			lcore_id++;
+			nb_lcores++;
 		}
 
 		ret = rte_eth_promiscuous_enable(portid);
@@ -831,22 +857,32 @@ main(int argc, char *argv[])
 	tsc_hz = rte_get_tsc_hz();
 	printf("Running at %lu hz\n", tsc_hz);
 
-	struct lcore_args args[nb_lcores - 1];
-	for (lcore_id = 1; lcore_id <= nb_ana_cores; ++lcore_id) {
-		args[lcore_id - 1].port_id = lcore_id - 1;
-		args[lcore_id - 1].queue_id = 0;
-		rte_eal_remote_launch((lcore_function_t *)ana_main, (void *)&args[lcore_id - 1], lcore_id);
+	lcore_id = c_lcore + 1;
+	nb_lcores = 0;
+	while (nb_lcores < nb_ana_cores) {
+		if (rte_lcore_is_enabled(lcore_id) == 0) {
+			lcore_id++;
+			continue;
+		}
+		args[lcore_id].port_id = 0;
+		args[lcore_id].queue_id = nb_lcores;
+		rte_eal_remote_launch((lcore_function_t *)ana_main, (void *)&args[lcore_id], lcore_id);
+		lcore_id++;
+		nb_lcores++;
 	}
 	for (uint16_t vport = 1; vport < nb_ports; ++vport) {
 		portid = vport_to_devport[vport];
-		const unsigned lcore_max = (1 + nb_ana_cores + (nb_cores_per_port * vport));
-		uint16_t queueid = 0;
-		for(; lcore_id < lcore_max; ++lcore_id) {
-			if (rte_lcore_is_enabled(lcore_id) == 0)
+		nb_lcores = 0;
+		while (nb_lcores < nb_cores_per_port) {
+			if (rte_lcore_is_enabled(lcore_id) == 0) {
+				lcore_id++;
 				continue;
-			args[lcore_id - 1].port_id = portid;
-			args[lcore_id - 1].queue_id = queueid++;
-			rte_eal_remote_launch((lcore_function_t *)crinkle_rx, (void *)&args[lcore_id - 1], lcore_id);
+			}
+			args[lcore_id].port_id = portid;
+			args[lcore_id].queue_id = nb_lcores;
+			rte_eal_remote_launch((lcore_function_t *)crinkle_rx, (void *)&args[lcore_id], lcore_id);
+			lcore_id++;
+			nb_lcores++;
 		}
 	}
 
