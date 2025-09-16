@@ -325,13 +325,12 @@ crinkle_command_handler(
 static inline void
 crinkle_process_burst(
 	struct rte_mbuf **bufs,
-	struct pkt_metadata *pkts,
 	const uint16_t nb_rx,
 	const uint64_t systime_ns,
 	const uint64_t port)
 {
 	struct rte_mbuf *buf;
-	struct pkt_metadata pkt;
+	struct tlr_struct s_tlr;
 	uint32_t *cand_tlr_ptr, ts_lower;
 	uint16_t i;
 	uint8_t *tlr;
@@ -340,47 +339,46 @@ crinkle_process_burst(
 		buf = bufs[i];
 		cand_tlr_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
 		ts_lower = *(cand_tlr_ptr - 2);
-		pkt.tlr.systime_ns = rte_cpu_to_be_64(systime_ns+i);
-		pkt.tlr.trailer = rte_cpu_to_be_64((mon_id << 48) | (port << 32) | ((pkt.tlr.systime_ns << 16) & 0x00000000FFFF0000) | MONPROT);
+		s_tlr.systime_ns = rte_cpu_to_be_64(systime_ns+i);
+		s_tlr.trailer = rte_cpu_to_be_64((mon_id << 48) | (port << 32) | ((s_tlr.systime_ns << 16) & 0x00000000FFFF0000) | MONPROT);
 
 		// Check for existing UUID trailer
 		if ((*cand_tlr_ptr & 0x0000FFFF) != MONPROT || (*cand_tlr_ptr >> 16) != (ts_lower & 0x0000FFFF)) {
 			if (unlikely((tlr = (uint8_t *)rte_pktmbuf_append(buf, 16)) == NULL)) {
 				printf("Failed to append trailer to packet\n");
-				return;
+				continue;
 			}
-			rte_mov16(tlr, (uint8_t *)(&pkt.tlr));
+			rte_mov16(tlr, (uint8_t *)(&s_tlr));
 		}
-
+		rte_mov16(rte_mbuf_to_priv(buf), (uint8_t *)(&s_tlr));
 		rte_pktmbuf_refcnt_update(buf, 3);
-		pkt.buf = buf;
-		pkts[i] = pkt;
-		//rte_ring_enqueue_elem(clone_ring, &pkt, sizeof(struct pkt_metadata));
 	}
-	//rte_ring_enqueue_bulk_elem(clone_ring, pkts, sizeof(struct pkt_metadata), nb_rx, NULL);
-	//printf("%lu - %u: %s\n", port, nb_rx, testout);
 }
 
 static inline void
 ana_clone_and_tx(
-	struct pkt_metadata *pkts,
 	struct rte_mbuf **bufs,
 	struct rte_mbuf **cbufs,
+	const unsigned char *local_ana_headers,
 	const uint16_t outport,
 	const uint16_t queue_id) 
 {
 	struct rte_mbuf *buf, *cbuf;
-	struct tlr_struct uid_trailer;
 	uint8_t *c;
-	unsigned nb_deq, nb_tx;
+	unsigned nb_deq, nb_tx, nb_available;
 	uint16_t i, pkt_size;
-	nb_deq = rte_ring_dequeue_burst_elem(clone_ring, pkts, sizeof(struct pkt_metadata), BURST_SIZE, NULL);
+	nb_deq = rte_ring_dequeue_burst(clone_ring, (void **)bufs, BURST_SIZE, &nb_available);
+	if (unlikely(nb_available > 6144)) {
+		printf("Warning: clone ring size high: %u\n", nb_available);
+	}
 
 	if (nb_deq > 0) {
 		for (i = 0; i < nb_deq; ++i) {
-			buf = pkts[i].buf;
-			bufs[i] = buf;
-			uid_trailer = pkts[i].tlr;
+			buf = bufs[i];
+			if (buf == NULL) {
+				printf("NULL packet in bufs at %u\n", i);
+				continue;
+			}
 			if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
 				printf("Failed to clone packet for analyzer\n");
 				rte_pktmbuf_refcnt_update(buf, -1);
@@ -393,9 +391,9 @@ ana_clone_and_tx(
 				continue;
 			}
 			pkt_size = rte_cpu_to_be_16(buf->data_len);
-			rte_mov64(c, ana_headers);
+			rte_mov64(c, local_ana_headers);
 			rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
-			rte_mov16(c+56, (uint8_t *)(&uid_trailer));
+			rte_mov16(c+56, (uint8_t *)(rte_mbuf_to_priv(buf)));
 			rte_mov16(c+72, rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16));
 			cbufs[i] = cbuf;
 		}
@@ -410,15 +408,16 @@ static int
 ana_main(
 	void *void_arg) 
 {
-	struct pkt_metadata pkts[BURST_SIZE];
 	struct rte_mbuf *bufs[BURST_SIZE], *cbufs[BURST_SIZE];
 	const struct lcore_args *arg = (const struct lcore_args *)void_arg;
 	const uint16_t queue_id = arg->queue_id;
 	const uint16_t outport = vport_to_devport[0];
+	unsigned char local_ana_headers[64];
+	rte_mov64(local_ana_headers, ana_headers);
 	printf("Starting analyzer tx on port %hu, queue %hu\n", outport, queue_id);
 
 	while (do_run) {
-		ana_clone_and_tx(pkts, bufs, cbufs, outport, queue_id);
+		ana_clone_and_tx(bufs, cbufs, local_ana_headers, outport, queue_id);
 	}
 	return 0;
 }
@@ -428,11 +427,9 @@ crinkle_rx(
 	void *void_arg)
 {
 	struct rte_mbuf *bufs[BURST_SIZE];
-	struct pkt_metadata pkts[BURST_SIZE];
 	struct timespec ts;
 	uint64_t systime_ns, tsc_start, current_tsc, ns_per_tsc;
 	int nb_rx;
-	unsigned nb_free = NUM_MBUFS;
 	const struct lcore_args *arg = (const struct lcore_args *)void_arg;
 	const uint16_t port_id = arg->port_id;
 	const uint16_t queue_id = arg->queue_id;
@@ -451,16 +448,10 @@ crinkle_rx(
 			current_tsc = rte_rdtsc_precise();
 			systime_ns += (current_tsc - tsc_start) * ns_per_tsc;
 			tsc_start = current_tsc;
-			crinkle_process_burst(bufs, pkts, nb_rx, systime_ns, port_id);
+			crinkle_process_burst(bufs, nb_rx, systime_ns, port_id);
 			send_burst_replayable(bufs, systime_ns, replay_start, replay_end,
 								  outport, queue_id, nb_rx);
-			for (unsigned i = 0; i < nb_rx; ++i) {
-				if (pkts[i].buf == NULL) printf("NULL packet in pkts at %u\n", i);
-			}
-			rte_ring_enqueue_bulk_elem(clone_ring, pkts, sizeof(struct pkt_metadata), nb_rx, &nb_free);
-			if (unlikely(nb_free < (NUM_MBUFS / 8))) {
-				printf("Clone ring getting full, free space %d\n", nb_free);
-			}
+			rte_ring_enqueue_burst(clone_ring, (void **)bufs, nb_rx, NULL);
 		}
 	}
 
@@ -600,7 +591,7 @@ main(int argc, char *argv[])
 	printf("Maximum replay size: %u\n", max_replay_size);
 
 	packet_pool = rte_pktmbuf_pool_create("packet_pool", (max_replay_size+256)*BURST_SIZE, RTE_MEMPOOL_CACHE_MAX_SIZE,
-		0, PKT_MBUF_DATA_SIZE, rte_socket_id());
+		16, PKT_MBUF_DATA_SIZE, rte_socket_id());
 
 	if (packet_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init packet mbuf pool: %s\n", rte_strerror(rte_errno));
@@ -611,16 +602,16 @@ main(int argc, char *argv[])
 	if (clone_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init clone mbuf pool: %s\n", rte_strerror(rte_errno));
 
+	clone_ring = rte_ring_create("clone_ring", NUM_MBUFS, rte_socket_id(), RING_F_MP_RTS_ENQ | RING_F_MC_RTS_DEQ);
+
+	if (clone_ring == NULL)
+		rte_exit(EXIT_FAILURE, "Cannot create clone ring: %s\n", rte_strerror(rte_errno));
+
 	replay_pool = rte_mempool_create("replay_pool", max_replay_size, sizeof(struct replay_buf),
 		RTE_MEMPOOL_CACHE_MAX_SIZE, 0, NULL, NULL, NULL, NULL, rte_socket_id(), 0);
 	
 	if (replay_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init replay mbuf pool: %s\n", rte_strerror(rte_errno));
-
-	clone_ring = rte_ring_create_elem("clone_ring", sizeof(struct pkt_metadata), NUM_MBUFS, rte_socket_id(), RING_F_MP_RTS_ENQ | RING_F_MC_RTS_DEQ);
-
-	if (clone_ring == NULL)
-		rte_exit(EXIT_FAILURE, "Cannot create clone ring: %s\n", rte_strerror(rte_errno));
 
 	replay_ring = rte_ring_create("replay_ring", max_replay_size, rte_socket_id(), RING_F_MP_HTS_ENQ | RING_F_MC_HTS_DEQ);
 
@@ -628,7 +619,7 @@ main(int argc, char *argv[])
 		rte_exit(EXIT_FAILURE, "Cannot create replay ring: %s\n", rte_strerror(rte_errno));
 
 	nb_lcores = rte_lcore_count();
-	nb_ana_cores = 1;
+	nb_ana_cores = 2;
 	nb_cores_per_port = (nb_lcores - 1 - nb_ana_cores) / (nb_ports - 1);
 	if (nb_cores_per_port == 0) {
 		rte_exit(EXIT_FAILURE, "Not enough cores, need at least %u\n", (nb_ports - 1 + nb_ana_cores + 1));
