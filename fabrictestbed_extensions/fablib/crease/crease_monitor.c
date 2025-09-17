@@ -20,13 +20,14 @@
 #include <rte_ring.h>
 #include <rte_soring.h>
 
-#define NUM_MBUFS 8192
+#define NUM_MBUFS 8192*2
 #define MBUF_CACHE_SIZE 128
 #define BURST_SIZE 64
 #define MIN_REPLAY_SIZE 128
 #define BURST_TX_DRAIN_US 1 /* TX drain every ~1us */
 /* Configure how many packets ahead to prefetch, when reading packets */
 #define PREFETCH_OFFSET	3
+#define CRINKLE_DEBUG 1
 
 /* allow max jumbo frame 9.5 KB */
 #define	JUMBO_FRAME_MAX_SIZE	0x2600
@@ -54,15 +55,15 @@ unsigned char ana_headers[64];
 const uint16_t ana_size = 88;
 uint64_t mon_id;
 uint16_t nb_ports;
-unsigned nb_lcores, c_lcore, r_lcore, max_replay_size, nb_worker_cores, worker_core_ids[RTE_MAX_LCORE];
+unsigned nb_lcores, rx_lcores[MAX_PORTS], max_replay_size, nb_worker_cores, worker_core_ids[RTE_MAX_LCORE];
 static struct rte_mempool *packet_pool, *clone_pool, *replay_pool;
 static struct rte_ring *replay_ring;
-static struct rte_soring *packet_ring;
+static struct rte_soring *packet_rings[MAX_PORTS - 1];
 
 //static int rx_queue_per_lcore = 1;
 
-#define RX_RING_SIZE 2048
-#define TX_RING_SIZE 8192
+#define RX_RING_SIZE 1024
+#define TX_RING_SIZE 4096
 static uint16_t nb_rxd = RX_RING_SIZE;
 static uint16_t nb_txd = TX_RING_SIZE;
 static struct rte_ether_addr ports_eth_addr[MAX_PORTS];
@@ -116,7 +117,6 @@ struct __rte_cache_aligned lcore_queue_conf {
 	uint16_t buf_queue_id[MAX_PORTS];
 	struct replay_mbuf_table buf_mbufs[MAX_PORTS];
 };
-static struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
 struct tlr_struct {
 	uint64_t systime_ns;
@@ -182,6 +182,18 @@ signal_handler(int signum)
 }
 
 static inline void
+debug_printf(const char *fmt, ...)
+{
+	#ifdef CRINKLE_DEBUG
+	va_list args;
+	va_start(args, fmt);
+	vprintf(fmt, args);
+	va_end(args);
+	#endif
+
+}
+
+static inline void
 send_burst_replayable(
 	struct rte_mbuf **bufs,
 	const uint64_t systime_ns,
@@ -198,18 +210,18 @@ send_burst_replayable(
 	nb_tx = rte_eth_tx_burst(outport, queueid, bufs, nb_rx);
 	if (unlikely(nb_tx < nb_rx)) {
 		rte_pktmbuf_free_bulk(&bufs[nb_tx], nb_rx - nb_tx);
-		printf("Failed to send all packets, sent %d, total %d\n", nb_tx, nb_rx);
+		debug_printf("Failed to send all packets, sent %d, total %d\n", nb_tx, nb_rx);
 	}
 
 	if (unlikely(systime_ns <= copy_replay_end && systime_ns >= copy_replay_start)) {
 		reti = rte_mempool_get(replay_pool, (void **)&rbuf);
 		if (unlikely(reti < 0)) {
-			printf("Error getting replay buf: %s\n", rte_strerror(-reti));
+			debug_printf("Error getting replay buf: %s\n", rte_strerror(-reti));
 		}
 
 		retu = rte_ring_enqueue_bulk_start(replay_ring, 1, NULL);
 		if (unlikely(retu < 1)) {
-			printf("Replay buffer overflow, not storing packets\n");
+			debug_printf("Replay buffer overflow, not storing packets\n");
 			rte_pktmbuf_free_bulk(bufs, nb_rx);
 			return;
 		}
@@ -298,7 +310,7 @@ crinkle_command_handler(
 		if (unlikely(c_ctrs[IDX_REPLAY_RUN] > 0)) return;
 		replay_end = 0;
 		for (i = 0; i < nb_lcores; ++i) {
-			if (unlikely(i == c_lcore)) continue;
+			if (unlikely(i == rx_lcores[0])) continue;
 			c_to_tx[i] |= TYPE_REPLAY_CLEAR;
 		}
 		c_ctrs[IDX_REPLAY_CLEAR] = nb_lcores;
@@ -311,7 +323,7 @@ crinkle_command_handler(
 		if (unlikely(c_ctrs[IDX_REPLAY_RUN] > 0)) return;
 		replay_run_start = extract_long(++cursor);
 		for (i = 0; i < nb_lcores; ++i) {
-			if (unlikely(i == c_lcore)) continue;
+			if (unlikely(i == rx_lcores[0])) continue;
 			c_to_tx[i] |= TYPE_REPLAY_RUN;
 		}
 		c_ctrs[IDX_REPLAY_RUN] = nb_lcores;
@@ -337,6 +349,7 @@ crinkle_process_burst(
 	struct rte_mbuf **cbufs,
 	struct packet_metadata *metas,
 	const unsigned char *local_ana_headers,
+	const uint16_t vport,
 	const uint16_t nb_rx,
 	const uint16_t outport,
 	const uint16_t queue_id)
@@ -353,13 +366,13 @@ crinkle_process_burst(
 		cand_tlr_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
 		ts_lower = *(cand_tlr_ptr - 2);
 		s_tlr.systime_ns = rte_cpu_to_be_64(metas[i].systime_ns + i);
-		s_tlr.trailer = rte_cpu_to_be_64((mon_id << 48) | ((uint64_t)(metas[i].tx_state.tx.port) << 32) | ((s_tlr.systime_ns << 16) & 0x00000000FFFF0000) | MONPROT);
+		s_tlr.trailer = rte_cpu_to_be_64((mon_id << 48) | ((uint64_t)(vport) << 32) | ((s_tlr.systime_ns << 16) & 0x00000000FFFF0000) | MONPROT);
 
 		// Check for existing UUID trailer
 		// TODO: FIX THAT THIS IS BACKWARDS
 		if ((*cand_tlr_ptr & 0x0000FFFF) != MONPROT || (*cand_tlr_ptr >> 16) != (ts_lower & 0x0000FFFF)) {
 			if (unlikely((tlr = (uint8_t *)rte_pktmbuf_append(buf, 16)) == NULL)) {
-				//printf("Failed to append trailer to packet\n");
+				debug_printf("Failed to append trailer to packet\n");
 				metas[i].tx_state.rc = -1;
 				continue;
 			}
@@ -367,29 +380,29 @@ crinkle_process_burst(
 		}
 		rte_pktmbuf_refcnt_update(buf, 2);
 		
-		if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
-			//printf("Failed to clone packet for analyzer, populated: %u\n", clone_pool->populated_size);
-			continue;
-		}
-		if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
-			//printf("Failed to prepend clone packet\n");
-			rte_pktmbuf_free(cbuf);
-			continue;
-		}
-		pkt_size = rte_cpu_to_be_16(buf->data_len);
-		rte_mov64(c, local_ana_headers);
-		rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
-		rte_mov16(c+56, (uint8_t *)(&s_tlr));
-		rte_mov16(c+72, rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16));
-		cbufs[c_ctr++] = cbuf;
+		// if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
+		// 	debug_printf("Failed to clone packet for analyzer, populated: %u\n", clone_pool->populated_size);
+		// 	continue;
+		// }
+		// if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
+		// 	debug_printf("Failed to prepend clone packet\n");
+		// 	rte_pktmbuf_free(cbuf);
+		// 	continue;
+		// }
+		// pkt_size = rte_cpu_to_be_16(buf->data_len);
+		// rte_mov64(c, local_ana_headers);
+		// rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
+		// rte_mov16(c+56, (uint8_t *)(&s_tlr));
+		// rte_mov16(c+72, rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16));
+		// cbufs[c_ctr++] = cbuf;
 	}
 
-	// TODO: Evaluate doing this in crinkle_rx instead
-	nb_tx = rte_eth_tx_burst(outport, queue_id, cbufs, c_ctr);
-	if (unlikely(nb_tx < c_ctr)) {
-		//printf("Failed to send all analyzer packets, sent %d, total %d\n", nb_tx, c_ctr);
-		rte_pktmbuf_free_bulk(&cbufs[nb_tx], c_ctr - nb_tx);
-	}
+	// // TODO: Evaluate doing this in crinkle_rx instead
+	// nb_tx = rte_eth_tx_burst(outport, queue_id, cbufs, c_ctr);
+	// if (unlikely(nb_tx < c_ctr)) {
+	// 	debug_printf("Failed to send all analyzer packets, sent %d, total %d\n", nb_tx, c_ctr);
+	// 	rte_pktmbuf_free_bulk(&cbufs[nb_tx], c_ctr - nb_tx);
+	// }
 }
 
 static int
@@ -402,19 +415,26 @@ crinkle_tx(
 	unsigned char local_ana_headers[64];
 	uint32_t n;
 	uint32_t ftoken;
+	uint16_t vport;
 	const struct lcore_args *arg = (const struct lcore_args *)void_arg;
 	const uint16_t port_id = arg->port_id;
 	const uint16_t queue_id = arg->queue_id;
 	printf("Starting crinkle on port %hu, queue %hu\n", port_id, queue_id);
+	debug_printf("Analyzer headers:\n");
+	debug_printf("  MAC dst: %02x:%02x:%02x:%02x:%02x:%02x\n",
+			ana_headers[0], ana_headers[1], ana_headers[2],
+			ana_headers[3], ana_headers[4], ana_headers[5]);
 
 	rte_mov64(local_ana_headers, ana_headers);
 
 	while (do_run) {
-		n = rte_soring_acquirx_burst(packet_ring, bufs, metas, 0, BURST_SIZE / 2, &ftoken, NULL);
-		if (n > 0) {
-			crinkle_process_burst(bufs, cbufs, metas, local_ana_headers, n, port_id, queue_id);
-			// NULL for bufs since the actual pointers aren't changed
-			rte_soring_releasx(packet_ring, NULL, metas, 0, n, ftoken);
+		for (vport = 1; vport < nb_ports; ++vport) {
+			n = rte_soring_acquirx_burst(packet_rings[vport-1], bufs, metas, 0, BURST_SIZE / 4, &ftoken, NULL);
+			if (n > 0) {
+				crinkle_process_burst(bufs, cbufs, metas, local_ana_headers, vport, n, port_id, queue_id);
+				// NULL for bufs since the actual pointers aren't changed
+				rte_soring_releasx(packet_rings[vport-1], NULL, metas, 0, n, ftoken);
+			}
 		}
 	}
 
@@ -423,81 +443,62 @@ crinkle_tx(
 
 static int
 crinkle_rx(
-	__rte_unused void *void_arg)
+	void *void_arg)
 {
 	struct rte_mbuf *bufs[BURST_SIZE];
-	struct rte_mbuf *drops[BURST_SIZE];
-	struct packet_metadata default_metas[MAX_PORTS][BURST_SIZE];
+	struct packet_metadata default_metas[BURST_SIZE];
 	struct packet_metadata metas[BURST_SIZE];
 	struct timespec ts;
+	const struct lcore_args *arg = (const struct lcore_args *)void_arg;
+	const uint16_t port_id = arg->port_id;
+	const uint16_t queue_id = arg->queue_id;
+	const uint16_t vport = devport_to_vport[port_id];
+	const uint16_t pidx = vport - 1;
+	const uint16_t outport = get_output_port_from_vport(vport);
 	uint64_t systime_ns, tsc_start, current_tsc, ns_per_tsc;
-	uint32_t n, nb_rx, nb_rem = 0, nb_drop = 0, nb_warn;
-	uint16_t i, j, k;
+	uint32_t n, nb_rx, nb_rem = 0, nb_warn;
+	uint16_t i;
 
 	clock_gettime(CLOCK_REALTIME, &ts);
 	systime_ns = timespec64_to_ns(&ts);
 	tsc_start = rte_rdtsc_precise();
 	ns_per_tsc = NSEC_PER_SEC / rte_get_tsc_hz();
 
-	for (i = 0; i < nb_ports - 1; ++i) {
-		for (j = 0; j < BURST_SIZE; ++j) {
-			default_metas[i][j].systime_ns = 0;
-			default_metas[i][j].tx_state.tx.port = i + 1;
-			default_metas[i][j].tx_state.tx.queue = 0;
-		}
+	for (i = 0; i < BURST_SIZE; ++i) {
+		default_metas[i].systime_ns = 0;
+		default_metas[i].tx_state.tx.port = vport;
+		default_metas[i].tx_state.tx.queue = 0;
 	}
 
 	nb_warn = (nb_ports - 1) * NUM_MBUFS * 0.8;
-	printf("Warn at %u packets pending processing\n", nb_warn);
+	debug_printf("Warn at %u packets pending processing\n", nb_warn);
 	while(do_run) {
-		for (i = 0; i < nb_ports - 1; ++i) {
-			nb_rx = rte_eth_rx_burst(vport_to_devport[i+1], 0, bufs, BURST_SIZE);
-			if (nb_rx > 0) {
-				/* Get time for packet trailers*/
-				current_tsc = rte_rdtsc_precise();
-				systime_ns += (current_tsc - tsc_start) * ns_per_tsc;
-				tsc_start = current_tsc;
-				for (j = 0; j < nb_rx; ++j) {
-					default_metas[i][j].systime_ns = systime_ns + j;
-				}
-
-				/* Enqueue */
-				n = rte_soring_enqueux_burst(packet_ring, bufs, default_metas[i], nb_rx, NULL);
-				if (unlikely(n < nb_rx)) {
-					printf("Warning: packet ring full, dropping %u packets\n", nb_rx - n);
-					rte_pktmbuf_free_bulk(&bufs[n], nb_rx - n);
-				}
-
-				/* Dequeue and Transmit */
-				n = rte_soring_dequeux_burst(packet_ring, bufs, metas, BURST_SIZE, &nb_rem);
-				if (nb_rem > nb_warn) {
-					printf("Warning: too many packets pending processing (%u)\n", nb_rem);
-				}
-				for (j = 0; j < n; j++) {
-					if (unlikely(metas[j].tx_state.rc < 0)) {
-						drops[nb_drop++] = bufs[j];
-					}
-					else {
-						for (k = j + 1; k < n; k++) {
-							if (metas[k].tx_state.rc != metas[j].tx_state.rc)
-								break;
-						}
-						send_burst_replayable(&bufs[j], systime_ns,
-											  replay_start, replay_end,
-											  get_output_port_from_vport(metas[j].tx_state.tx.port),
-											  metas[j].tx_state.tx.queue,
-											  k - j);
-						j = k - 1;
-					}
-				}
-
-				/* Drop errored packets */
-				if (nb_drop > 0) {
-					printf("Dropping %u packets\n", nb_drop);
-					rte_pktmbuf_free_bulk(drops, nb_drop);
-					nb_drop = 0;
-				}
+		nb_rx = rte_eth_rx_burst(port_id, 0, bufs, BURST_SIZE);
+		if (nb_rx > 0) {
+			/* Get time for packet trailers*/
+			current_tsc = rte_rdtsc_precise();
+			systime_ns += (current_tsc - tsc_start) * ns_per_tsc;
+			tsc_start = current_tsc;
+			for (i = 0; i < nb_rx; ++i) {
+				default_metas[i].systime_ns = systime_ns + i;
 			}
+
+			/* Enqueue */
+			n = rte_soring_enqueux_burst(packet_rings[pidx], bufs, default_metas, nb_rx, NULL);
+			if (unlikely(n < nb_rx)) {
+				debug_printf("Warning: packet ring full, dropping %u packets\n", nb_rx - n);
+				rte_pktmbuf_free_bulk(&bufs[n], nb_rx - n);
+			}
+		}
+
+		/* Dequeue and Transmit */
+		n = rte_soring_dequeux_burst(packet_rings[pidx], bufs, metas, BURST_SIZE, &nb_rem);
+		if (nb_rem > nb_warn) {
+			debug_printf("Warning: too many packets pending processing (%u)\n", nb_rem);
+		}
+		if (n > 0) {
+			send_burst_replayable(bufs, systime_ns, replay_start, replay_end,
+									outport, queue_id, n);
 		}
 	}
 
@@ -637,26 +638,16 @@ main(int argc, char *argv[])
 	printf("Maximum replay size: %u\n", max_replay_size);
 
 	nb_lcores = rte_lcore_count();
-	nb_worker_cores = nb_lcores - 2;
+	nb_worker_cores = nb_lcores - nb_ports;
 	if (nb_worker_cores == 0) {
-		rte_exit(EXIT_FAILURE, "Not enough cores, need at least 3\n");
+		rte_exit(EXIT_FAILURE, "Not enough cores, need at least %u\n", nb_ports + 1);
 	}
 	uint16_t portid;
 	unsigned lcore_id = 0, lcore_ctr = 0;
-	struct lcore_queue_conf *qconf;
 	struct rte_eth_dev_info dev_info;
 	struct rte_eth_txconf *txconf;
 	uint16_t queueid;
 	ssize_t packet_ring_size = 0;
-	struct rte_soring_param prm = {
-		.name = "packet_ring",
-		.elems = (nb_ports - 1) * NUM_MBUFS,
-		.elem_size = sizeof(struct rte_mbuf *),
-		.meta_size = sizeof(struct packet_metadata),
-		.stages = 1,
-		.prod_synt = RTE_RING_SYNC_ST,
-		.cons_synt = RTE_RING_SYNC_ST
-	};
 
 
 	packet_pool = rte_pktmbuf_pool_create("packet_pool", (max_replay_size+256)*BURST_SIZE, RTE_MEMPOOL_CACHE_MAX_SIZE,
@@ -664,19 +655,34 @@ main(int argc, char *argv[])
 
 	if (packet_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init packet mbuf pool: %s\n", rte_strerror(rte_errno));
-
-	packet_ring_size = rte_soring_get_memsize(&prm);
-
-	if (packet_ring_size < 0)
-		rte_exit(EXIT_FAILURE, "Cannot get packet soring size: %s\n", rte_strerror(-packet_ring_size));
 	
-	packet_ring = rte_zmalloc("packet_ring", packet_ring_size, RTE_CACHE_LINE_SIZE);
-	if (packet_ring == NULL)
-		rte_exit(EXIT_FAILURE, "Cannot allocate packet soring: %s\n", rte_strerror(rte_errno));
+	for (uint16_t i = 0; i < nb_ports - 1; ++i) {
+		packet_rings[i] = NULL;
+		char *temp_str = rte_zmalloc("packet_ring_name", 32, RTE_CACHE_LINE_SIZE);
+		snprintf(temp_str, 32, "packet_ring_%hu", i);
+		struct rte_soring_param prm = {
+			.name = temp_str,
+			.elems = NUM_MBUFS,
+			.elem_size = sizeof(struct rte_mbuf *),
+			.meta_size = sizeof(struct packet_metadata),
+			.stages = 1,
+			.prod_synt = RTE_RING_SYNC_ST,
+			.cons_synt = RTE_RING_SYNC_ST
+		};
+		
+		packet_ring_size = rte_soring_get_memsize(&prm);
 
-	ret = rte_soring_init(packet_ring, &prm);
-	if (ret < 0)
-		rte_exit(EXIT_FAILURE, "Cannot create packet soring: %s\n", rte_strerror(-ret));
+		if (packet_ring_size < 0)
+			rte_exit(EXIT_FAILURE, "Cannot get packet soring size: %s\n", rte_strerror(-packet_ring_size));
+		
+		packet_rings[i] = rte_zmalloc("packet_ring", packet_ring_size, RTE_CACHE_LINE_SIZE);
+		if (packet_rings[i] == NULL)
+			rte_exit(EXIT_FAILURE, "Cannot allocate packet soring: %s\n", rte_strerror(rte_errno));
+
+		ret = rte_soring_init(packet_rings[i], &prm);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "Cannot create packet soring: %s\n", rte_strerror(-ret));
+	}
 
 	clone_pool = rte_pktmbuf_pool_create("clone_pool", NUM_MBUFS*2, RTE_MEMPOOL_CACHE_MAX_SIZE,
 		0, 0, rte_socket_id());
@@ -709,22 +715,20 @@ main(int argc, char *argv[])
 	
 
 	/* Initialize ana port */
-	while (rte_lcore_is_enabled(lcore_id) == 0) {
-		lcore_id++;
-		if (lcore_id >= RTE_MAX_LCORE)
+	lcore_id = rte_get_next_lcore(-1, 0, 0);
+	if (lcore_id == RTE_MAX_LCORE)
+		rte_exit(EXIT_FAILURE, "Not enough cores\n");
+	rx_lcores[0] = lcore_id;
+	for (uint16_t vport = 1; vport < nb_ports; ++vport) {
+		lcore_id = rte_get_next_lcore(lcore_id, 1, 0);
+		if (lcore_id == RTE_MAX_LCORE)
 			rte_exit(EXIT_FAILURE, "Not enough cores\n");
+		rx_lcores[vport] = lcore_id;
 	}
-	c_lcore = lcore_id++;
-	while (rte_lcore_is_enabled(lcore_id) == 0) {
-		lcore_id++;
-		if (lcore_id >= RTE_MAX_LCORE)
-			rte_exit(EXIT_FAILURE, "Not enough cores\n");
-	}
-	r_lcore = lcore_id++;
 	uint16_t worker_nb_txd = nb_txd;
-	while (worker_nb_txd > nb_txd / nb_worker_cores) {
-		worker_nb_txd >>= 1;
-	}
+	// while (worker_nb_txd > nb_txd / nb_worker_cores) {
+	// 	worker_nb_txd >>= 1;
+	// }
 	printf("Using %u worker cores\n", nb_worker_cores);
 	printf("Using %u TX descriptors per worker core\n", worker_nb_txd);
 
@@ -744,7 +748,7 @@ main(int argc, char *argv[])
 			local_port_conf.rxmode.mtu);
 
 		printf("Initializing port %d on lcore %u... ", portid,
-			c_lcore);
+			rx_lcores[0]);
 		fflush(stdout);
 
 		ret = rte_eth_dev_configure(portid, 1, nb_worker_cores,
@@ -780,15 +784,14 @@ main(int argc, char *argv[])
 					     &rxq_conf,
 					     packet_pool);
 		if (ret < 0)
-			rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%s, port=%d\n",
+			rte_exit(EXIT_FAILURE, "rte_eth_rx_queue_setup: err=%s, port=%d\n",
 				  rte_strerror(-ret), portid);
 
 		lcore_ctr = 0;
 		while (lcore_ctr < nb_worker_cores) {
-			if (rte_lcore_is_enabled(lcore_id) == 0) {
-				lcore_id++;
-				continue;
-			}
+			lcore_id = rte_get_next_lcore(lcore_id, 1, 0);
+			if (lcore_id == RTE_MAX_LCORE)
+				rte_exit(EXIT_FAILURE, "Not enough cores\n");
 			worker_core_ids[lcore_ctr] = lcore_id;
 			printf("txq=%u,%hu ", lcore_id, queueid);
 			fflush(stdout);
@@ -801,7 +804,6 @@ main(int argc, char *argv[])
 				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%s, "
 					  "port=%d\n", rte_strerror(-ret), portid);
 			queueid++;
-			lcore_id++;
 			lcore_ctr++;
 		}
 		ret = rte_eth_dev_start(portid);
@@ -830,7 +832,7 @@ main(int argc, char *argv[])
 		    local_port_conf.rxmode.mtu);
 
 		printf("Initializing port %d on lcore %u... ", portid,
-			r_lcore);
+			rx_lcores[vport]);
 		fflush(stdout);
 		ret = rte_eth_dev_configure(portid, 1, nb_worker_cores,
 					&local_port_conf);
@@ -871,13 +873,13 @@ main(int argc, char *argv[])
 		/* init one TX queue */
 		queueid = 0;
 		
-		printf("txq=%u,%hu ", r_lcore, queueid);
+		printf("txq=%u,%hu ", rx_lcores[vport], queueid);
 		fflush(stdout);
 
 		txconf = &dev_info.default_txconf;
 		//printf("txconf offloads: 0x%" PRIx64 "\n", txconf->offloads);
 		ret = rte_eth_tx_queue_setup(portid, queueid, nb_txd,
-							rte_lcore_to_socket_id(r_lcore), txconf);
+							rte_lcore_to_socket_id(rx_lcores[vport]), txconf);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup: err=%s, "
 					"port=%d\n", rte_strerror(-ret), portid);
@@ -900,25 +902,30 @@ main(int argc, char *argv[])
 	tsc_hz = rte_get_tsc_hz();
 	printf("Running at %lu hz\n", tsc_hz);
 
-	rte_eal_remote_launch((lcore_function_t *)crinkle_rx, NULL, r_lcore);
+	for (uint16_t vport = 1; vport < nb_ports; ++vport) {
+		lcore_id = rx_lcores[vport];
+		args[lcore_id].port_id = vport_to_devport[vport];
+		args[lcore_id].queue_id = 0;
+		rte_eal_remote_launch((lcore_function_t *)crinkle_rx, (void *)&args[lcore_id], lcore_id);
+	}
 	lcore_ctr = 0;
 	while (lcore_ctr < nb_worker_cores) {
 		lcore_id = worker_core_ids[lcore_ctr];
-		args[lcore_ctr].port_id = vport_to_devport[0];
-		args[lcore_ctr].queue_id = lcore_ctr;
-		rte_eal_remote_launch((lcore_function_t *)crinkle_tx, (void *)&args[lcore_ctr], lcore_id);
+		args[lcore_id].port_id = vport_to_devport[0];
+		args[lcore_id].queue_id = lcore_ctr;
+		rte_eal_remote_launch((lcore_function_t *)crinkle_tx, (void *)&args[lcore_id], lcore_id);
 		lcore_ctr++;
 	}
 
 	struct rte_mbuf *bufs[BURST_SIZE];
 	struct timespec systime;
 	struct rte_eth_stats stats;
-	uint64_t systime_ns;
+	uint64_t systime_ns, last_stat_print = 0;
 	uint16_t port_id;
 	unsigned k;
 	int i, nb_rx;
-	lcore_id = c_lcore;
-	qconf = &lcore_queue_conf[lcore_id];
+	lcore_id = rx_lcores[0];
+	uint64_t last_packets_rx[nb_ports], last_packets_tx[nb_ports];
 
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
@@ -926,9 +933,31 @@ main(int argc, char *argv[])
 	while (do_run) {
 		clock_gettime(CLOCK_REALTIME, &systime);
 		systime_ns = timespec64_to_ns(&systime);
-		portid = qconf->rx_queue_list[0];
+		portid = vport_to_devport[0];
+
+		if (systime_ns - last_stat_print > NSEC_PER_SEC) {
+			last_stat_print = systime_ns;
+			RTE_ETH_FOREACH_DEV(port_id) {
+				rte_eth_stats_get(port_id, &stats);
+				printf("=== Port %hu stats ===\n", port_id);
+				printf("  RX packets: %lu\n", stats.ipackets);
+				printf("  RX missed: %lu\n", stats.imissed);
+				printf("  RX errors: %lu\n", stats.ierrors);
+				printf("  RX no mbuf: %lu\n", stats.rx_nombuf);
+				printf("  RX per sec: %lu\n", stats.ipackets - last_packets_rx[port_id]);
+				printf("  TX packets: %lu\n", stats.opackets);
+				printf("  TX errors: %lu\n", stats.oerrors);
+				printf("  TX per sec: %lu\n", stats.opackets - last_packets_tx[port_id]);
+				last_packets_rx[port_id] = stats.ipackets;
+				last_packets_tx[port_id] = stats.opackets;
+			}
+		}
 		
 		nb_rx = rte_eth_rx_burst(portid, 0, bufs, BURST_SIZE);
+
+		if (nb_rx > 0) {
+			printf("Received %d command packets on port %hu\n", nb_rx, portid);
+		}
 
 		for (i = 0; i < nb_rx; ++i) {
 			crinkle_command_handler(bufs[i], systime_ns);
@@ -956,7 +985,8 @@ main(int argc, char *argv[])
 
 	RTE_ETH_FOREACH_DEV(port_id) {
 		rte_eth_stats_get(port_id, &stats);
-		printf("Port %hu received %lu packets, missed %lu\n", port_id, stats.ipackets, stats.imissed);
+		printf("Port %hu received %lu packets, missed %lu, errors %lu, no buffer %lu\n",
+			   port_id, stats.ipackets, stats.imissed, stats.ierrors, stats.rx_nombuf);
 	}
 
 	/* clean up the EAL */
