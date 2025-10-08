@@ -1409,7 +1409,7 @@ class CrinkleSlice(Slice):
         each interface, then returns a dict of form dict[node name, dict[iface name, (dev name, rx, tx)]].
         """
         rdict: dict[str, dict[str, tuple[str, int, int]]] = {}
-        for node in self.get_non_crinkle_nodes():
+        for node in self.get_nodes():
             if node.get_image() in UBUNTU_IMAGES:
                 nodename = node.get_name()
                 for iface in node.get_interfaces():
