@@ -7,6 +7,7 @@ import enum
 import shutil
 import time
 import random
+import re
 from IPython.core.display_functions import display
 from datetime import datetime
 from typing import TYPE_CHECKING, Union
@@ -1502,7 +1503,16 @@ class CrinkleSlice(Slice):
         return ret_str
                 
 
-    def get_graph(self, name: str = "graph", filterin: str = None, tstart = None, tend = None, tformat="epoch", pkt_id = None, quiet=True):
+    def get_graph(
+            self,
+            name: str = "graph",
+            filterin: str = None,
+            tstart: str = None,
+            tend: str = None,
+            tformat: str = "epoch",
+            pkt_id: str = None,
+            quiet: bool = True,
+            download: bool = True):
         """
         Produce and download a graph of the data stored in the analyzer's SPADE database,
         filtered using the given arguments.
@@ -1621,7 +1631,187 @@ class CrinkleSlice(Slice):
         graph_build += f'''\\$graph2 = \\$graph1.getLineage(\\$graph1.getVertex({spade_filter}), 1, 'b')\n\\$graph3 = \\$graph2 + \\$base.getPath(\\$graph2.getVertex(\\"type\\" == 'Process'), \\$base.getVertex(\\"type\\" == 'Agent'), 1)'''
         self.analyzer.execute(f'echo -e "set storage Neo4j\n{graph_build}\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$graph3" | ./{REMOTEWORKDIR}/SPADE/bin/spade query; '
                                 f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg', quiet=quiet)
-        self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
+        if download: self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
+                
+
+    def dump_provenance(
+            self,
+            name: str = "prov",
+            filterin: str = None,
+            tstart: str = None,
+            tend: str = None,
+            tformat: str = "epoch",
+            pkt_id: str = None,
+            quiet: bool = True):
+        """
+        Query the provenance database and return the results as a dict of the form
+        dict[pkt_id, list[pkt_info]],
+        where pkt_info is a dict of the following fields:
+            - time
+            - host
+            - interface
+            - direction (rx/tx)
+            - size
+            - epoch
+            - flow fields (src/dst ip, src/dst port, protocol)
+        as a list sorted by time.
+        """
+        self.get_graph(name=name, filterin=filterin, tstart=tstart, tend=tend,
+                       tformat=tformat, pkt_id=pkt_id, quiet=quiet, download=False)
+        self.analyzer.download_file(f'{name}.dot', f'{REMOTEWORKDIR}/{name}.dot')
+        prov_dict: dict[str, list[dict[str, str]]] = {}
+        iface_host_map: dict[str, str] = {}
+        flow_map: dict[str, dict[str, str]] = {}
+        flow_keys = ['eth.type', 'ip.prot', 'ip.src', 'ip.dst', 'prot.sport', 'prot.dport']
+        with open(f'{name}.dot', 'r') as f:
+            lines = f.readlines()
+            for line in lines:
+                if "->" not in line:
+                    if "label=" in line:
+                        label = re.search(r'label="([^"]*)"', line)
+                        if not label: continue
+                        label = label.group(1)
+                        label_parts = label.split('\\n')
+                        label_dict = {}
+                        for part in label_parts:
+                            key, value = part.split(':', 1)
+                            label_dict[key.strip()] = value.strip()
+                        if 'type' not in label_dict: continue
+                        if label_dict['type'] == 'Artifact':
+                            flow_id = re.search(r'"([^"]*)"', line)
+                            if not flow_id: continue
+                            flow_id = flow_id.group(1)
+                            flow_map[flow_id] = {}
+                            for key in flow_keys:
+                                if key in label_dict:
+                                    flow_map[flow_id][key] = label_dict[key]
+                else:
+                    if "label=" in line:
+                        label = re.search(r'label="([^"]*)"', line)
+                        if not label: continue
+                        label = label.group(1)
+                        label_parts = label.split('\\n')
+                        label_dict = {}
+                        for part in label_parts:
+                            key, value = part.split(':', 1)
+                            label_dict[key.strip()] = value.strip()
+                        if 'type' not in label_dict: continue
+                        if label_dict['type'] == 'WasControlledBy':
+                            edge = re.search(r'"([^"]*)"\s*->\s*"([^"]*)"', line)
+                            if not edge: continue
+                            iface = edge.group(1)
+                            node = edge.group(2)
+                            if iface not in iface_host_map: iface_host_map[iface] = {}
+                            iface_host_map[iface] = node
+            for line in lines:
+                if '->' in line:
+                    if "label=" in line:
+                        label = re.search(r'label="([^"]*)"', line)
+                        if not label: continue
+                        label = label.group(1)
+                        label_parts = label.split('\\n')
+                        label_dict = {}
+                        for part in label_parts:
+                            key, value = part.split(':', 1)
+                            label_dict[key.strip()] = value.strip()
+                        if 'type' not in label_dict: continue
+                        if label_dict['type'] == 'Used':
+                            edge = re.search(r'"([^"]*)"\s*->\s*"([^"]*)"', line)
+                            if not edge: continue
+                            iface = edge.group(1)
+                            artifact = edge.group(2)
+                            if 'pkt_id' not in label_dict: continue
+                            pkt_id = label_dict['pkt_id']
+                            if pkt_id not in prov_dict: prov_dict[pkt_id] = []
+                            prov_dict[pkt_id].append({
+                                'host': iface_host_map.get(iface, 'unknown'),
+                                'interface': iface,
+                                'direction': "RX",
+                                'size': label_dict.get('size', "0"),
+                                'epoch': label_dict.get('epoch', "0"),
+                                'time': label_dict.get('time', "0"),
+                            })
+                            if artifact in flow_map:
+                                for key, value in flow_map[artifact].items():
+                                    prov_dict[pkt_id][-1][key] = value
+                        elif label_dict['type'] == 'WasGeneratedBy':
+                            edge = re.search(r'"([^"]*)"\s*->\s*"([^"]*)"', line)
+                            if not edge: continue
+                            artifact = edge.group(1)
+                            iface = edge.group(2)
+                            if 'pkt_id' not in label_dict: continue
+                            pkt_id = label_dict['pkt_id']
+                            if pkt_id not in prov_dict: prov_dict[pkt_id] = []
+                            prov_dict[pkt_id].append({
+                                'host': iface_host_map.get(iface, 'unknown'),
+                                'interface': iface,
+                                'direction': "TX",
+                                'size': label_dict.get('size', "0"),
+                                'epoch': label_dict.get('epoch', "0"),
+                                'time': label_dict.get('time', "0"),
+                            })
+                            if artifact in flow_map:
+                                for key, value in flow_map[artifact].items():
+                                    prov_dict[pkt_id][-1][key] = value
+        for pkt_id in prov_dict:
+            prov_dict[pkt_id] = sorted(prov_dict[pkt_id], key=lambda x: x['time'])
+        return prov_dict
+    
+    def list_provenance(
+            self,
+            output=None,
+            fields=None,
+            filter_function=None,
+            name: str = "prov",
+            filterin: str = None,
+            tstart: str = None,
+            tend: str = None,
+            tformat: str = "epoch",
+            pkt_id: str = None,
+            quiet: bool = False,
+            pretty_names: bool = True):
+        table = []
+        prov_dict = self.dump_provenance(name=name, filterin=filterin, tstart=tstart,
+                                        tend=tend, tformat=tformat, pkt_id=pkt_id, quiet=True)
+        pretty_names_dict = {}
+        if pretty_names:
+            pretty_names_dict = {
+                "pkt_id": "Packet ID",
+                "time": "Time",
+                "host": "Host",
+                "interface": "Interface",
+                "direction": "Direction",
+                "size": "Size",
+                "epoch": "Epoch",
+                "eth.type": "Ether Type",
+                "ip.prot": "IP Protocol",
+                "ip.src": "Source IP",
+                "ip.dst": "Destination IP",
+                "prot.sport": "Source Port",
+                "prot.dport": "Destination Port"
+            }
+
+        for pkt_id, pkt_list in prov_dict.items():
+            for pkt_info in pkt_list:
+                rowdict = {"pkt_id": pkt_id}
+                rowdict.update(pkt_info)
+                table.append(rowdict)
+
+        table = sorted(table, key=lambda x: (x["pkt_id"], x["time"]))
+        table = self.get_fablib_manager().list_table(
+            table,
+            fields=fields,
+            title="Packet Provenance",
+            output=output,
+            quiet=True,
+            filter_function=filter_function,
+            pretty_names_dict=pretty_names_dict
+        )
+
+        if table and not quiet:
+            display(table)
+
+        return table
 
     def reset_monitor_string(self):
         logging.info("Crinkle tried to start with blank monitor string, regenerating it")
