@@ -1119,7 +1119,7 @@ class CrinkleSlice(Slice):
             self.cnets[site]=self.analyzer_cnet
             jobs: list[futures.Future] = []
             counter = 0
-            self.monitor_string = f"{self.analyzer_iface.get_device_name()} "
+            self.monitor_string = f"{self.analyzer_iface.get_device_name()} {self.analyzer.get_cores() - 1}"
             for key, monitor in self.monitors.items():
                 logging.info(f"Refreshing monitor for net {key} after slice creation, count {counter}")
                 refreshed_monitor = self.get_monitor(monitor.get_name())
@@ -1832,6 +1832,7 @@ class CrinkleSlice(Slice):
             self.reset_monitor_string()
         self.analyzer.execute(f'''sudo killall python3; echo -e "remove storage PostgreSQL\n" | ./{REMOTEWORKDIR}/SPADE/bin/spade control; ./{REMOTEWORKDIR}/SPADE/bin/manage-postgres.sh clear; echo -e "add storage PostgreSQL\n" | ./{REMOTEWORKDIR}/SPADE/bin/spade control''', quiet=quiet)
         self.analyzer.execute_thread(f'sudo ./{REMOTEWORKDIR}/spade_reader.py {self.monitor_string}')
+        print("Analyzer reset")
     
     def start_monitor(self, monitor: CrinkleMonitor, wait: bool=True, quiet: bool=False) -> futures.Future | None:
         """
