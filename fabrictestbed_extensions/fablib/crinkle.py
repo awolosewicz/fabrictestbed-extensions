@@ -1797,7 +1797,7 @@ class CrinkleSlice(Slice):
                 rowdict.update(pkt_info)
                 table.append(rowdict)
 
-        table = sorted(table, key=lambda x: (x["pkt_id"], x["time"]))
+        table = sorted(table, key=lambda x: (x["pkt_id"], x["time"], x["direction"]))
         table = self.get_fablib_manager().list_table(
             table,
             fields=fields,
