@@ -22,12 +22,12 @@
 
 #define NUM_MBUFS 8192*2
 #define MBUF_CACHE_SIZE 128
-#define BURST_SIZE 64
+#define BURST_SIZE 128
 #define MIN_REPLAY_SIZE 128
 #define BURST_TX_DRAIN_US 1 /* TX drain every ~1us */
 /* Configure how many packets ahead to prefetch, when reading packets */
 #define PREFETCH_OFFSET	3
-#define CRINKLE_DEBUG 1
+//#define CRINKLE_DEBUG 1
 
 /* allow max jumbo frame 9.5 KB */
 #define	JUMBO_FRAME_MAX_SIZE	0x2600
@@ -356,7 +356,7 @@ crinkle_process_burst(
 {
 	struct rte_mbuf *buf, *cbuf;
 	struct tlr_struct s_tlr;
-	uint32_t *cand_tlr_ptr, ts_lower;
+	uint32_t *cand_tlr_ptr, cand_tlr, ts_lower;
 	uint16_t i, nb_tx, pkt_size, c_ctr;
 	uint8_t *tlr, *c;
 
@@ -364,13 +364,14 @@ crinkle_process_burst(
 	for (i = 0; i < nb_rx; ++i) {
 		buf = bufs[i];
 		cand_tlr_ptr = rte_pktmbuf_mtod_offset(buf, uint32_t*, buf->data_len-4);
-		ts_lower = *(cand_tlr_ptr - 2);
-		s_tlr.systime_ns = rte_cpu_to_be_64(metas[i].systime_ns + i);
-		s_tlr.trailer = rte_cpu_to_be_64((mon_id << 48) | ((uint64_t)(vport) << 32) | ((s_tlr.systime_ns << 16) & 0x00000000FFFF0000) | MONPROT);
+		cand_tlr = rte_be_to_cpu_32(*cand_tlr_ptr);
+		ts_lower = rte_be_to_cpu_32(*(cand_tlr_ptr - 2));
+		s_tlr.systime_ns = rte_cpu_to_be_64(metas[i].systime_ns);
+		s_tlr.trailer = rte_cpu_to_be_64((mon_id << 48) | ((uint64_t)(vport) << 32) | (((metas[i].systime_ns << 16) & 0x00000000FFFF0000) | MONPROT));
 
 		// Check for existing UUID trailer
 		// TODO: FIX THAT THIS IS BACKWARDS
-		if ((*cand_tlr_ptr & 0x0000FFFF) != MONPROT || (*cand_tlr_ptr >> 16) != (ts_lower & 0x0000FFFF)) {
+		if ((cand_tlr & 0x0000FFFF) != MONPROT || (cand_tlr >> 16) != (ts_lower & 0x0000FFFF)) {
 			if (unlikely((tlr = (uint8_t *)rte_pktmbuf_append(buf, 16)) == NULL)) {
 				debug_printf("Failed to append trailer to packet\n");
 				metas[i].tx_state.rc = -1;
@@ -380,38 +381,38 @@ crinkle_process_burst(
 		}
 		rte_pktmbuf_refcnt_update(buf, 2);
 		
-		// if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
-		// 	debug_printf("Failed to clone packet for analyzer, populated: %u\n", clone_pool->populated_size);
-		// 	continue;
-		// }
-		// if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
-		// 	debug_printf("Failed to prepend clone packet\n");
-		// 	rte_pktmbuf_free(cbuf);
-		// 	continue;
-		// }
-		// pkt_size = rte_cpu_to_be_16(buf->data_len);
-		// rte_mov64(c, local_ana_headers);
-		// rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
-		// rte_mov16(c+56, (uint8_t *)(&s_tlr));
-		// rte_mov16(c+72, rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16));
-		// cbufs[c_ctr++] = cbuf;
+		if (unlikely ((cbuf = rte_pktmbuf_clone(buf, clone_pool)) == NULL)) {
+			debug_printf("Failed to clone packet for analyzer, populated: %u\n", clone_pool->populated_size);
+			continue;
+		}
+		if (unlikely((c = (uint8_t*)rte_pktmbuf_prepend(cbuf, 88)) == NULL)) {
+			debug_printf("Failed to prepend clone packet\n");
+			rte_pktmbuf_free(cbuf);
+			continue;
+		}
+		pkt_size = rte_cpu_to_be_16(buf->data_len);
+		rte_mov64(c, local_ana_headers);
+		rte_mov15_or_less(c+54, (uint8_t *)(&pkt_size), 2);
+		rte_mov16(c+56, (uint8_t *)(&s_tlr));
+		rte_mov16(c+72, rte_pktmbuf_mtod_offset(buf, uint8_t*, buf->data_len-16));
+		cbufs[c_ctr++] = cbuf;
 	}
 
-	// // TODO: Evaluate doing this in crinkle_rx instead
-	// nb_tx = rte_eth_tx_burst(outport, queue_id, cbufs, c_ctr);
-	// if (unlikely(nb_tx < c_ctr)) {
-	// 	debug_printf("Failed to send all analyzer packets, sent %d, total %d\n", nb_tx, c_ctr);
-	// 	rte_pktmbuf_free_bulk(&cbufs[nb_tx], c_ctr - nb_tx);
-	// }
+	// TODO: Evaluate doing this in crinkle_rx instead
+	nb_tx = rte_eth_tx_burst(outport, queue_id, cbufs, c_ctr);
+	if (unlikely(nb_tx < c_ctr)) {
+		debug_printf("Failed to send all analyzer packets, sent %d, total %d\n", nb_tx, c_ctr);
+		rte_pktmbuf_free_bulk(&cbufs[nb_tx], c_ctr - nb_tx);
+	}
 }
 
 static int
 crinkle_tx(
 	void *void_arg)
 {
-	struct rte_mbuf *bufs[BURST_SIZE];
-	struct rte_mbuf *cbufs[BURST_SIZE];
-	struct packet_metadata metas[BURST_SIZE];
+	struct rte_mbuf *bufs[BURST_SIZE/2];
+	struct rte_mbuf *cbufs[BURST_SIZE/2];
+	struct packet_metadata metas[BURST_SIZE/2];
 	unsigned char local_ana_headers[64];
 	uint32_t n;
 	uint32_t ftoken;
@@ -420,16 +421,12 @@ crinkle_tx(
 	const uint16_t port_id = arg->port_id;
 	const uint16_t queue_id = arg->queue_id;
 	printf("Starting crinkle on port %hu, queue %hu\n", port_id, queue_id);
-	debug_printf("Analyzer headers:\n");
-	debug_printf("  MAC dst: %02x:%02x:%02x:%02x:%02x:%02x\n",
-			ana_headers[0], ana_headers[1], ana_headers[2],
-			ana_headers[3], ana_headers[4], ana_headers[5]);
 
 	rte_mov64(local_ana_headers, ana_headers);
 
 	while (do_run) {
 		for (vport = 1; vport < nb_ports; ++vport) {
-			n = rte_soring_acquirx_burst(packet_rings[vport-1], bufs, metas, 0, BURST_SIZE / 4, &ftoken, NULL);
+			n = rte_soring_acquirx_burst(packet_rings[vport-1], bufs, metas, 0, BURST_SIZE/2, &ftoken, NULL);
 			if (n > 0) {
 				crinkle_process_burst(bufs, cbufs, metas, local_ana_headers, vport, n, port_id, queue_id);
 				// NULL for bufs since the actual pointers aren't changed
@@ -455,14 +452,14 @@ crinkle_rx(
 	const uint16_t vport = devport_to_vport[port_id];
 	const uint16_t pidx = vport - 1;
 	const uint16_t outport = get_output_port_from_vport(vport);
-	uint64_t systime_ns, tsc_start, current_tsc, ns_per_tsc;
+	uint64_t systime_ns, last_ns, tsc_start, current_tsc;
 	uint32_t n, nb_rx, nb_rem = 0, nb_warn;
 	uint16_t i;
 
 	clock_gettime(CLOCK_REALTIME, &ts);
 	systime_ns = timespec64_to_ns(&ts);
 	tsc_start = rte_rdtsc_precise();
-	ns_per_tsc = NSEC_PER_SEC / rte_get_tsc_hz();
+	last_ns = systime_ns;
 
 	for (i = 0; i < BURST_SIZE; ++i) {
 		default_metas[i].systime_ns = 0;
@@ -476,14 +473,14 @@ crinkle_rx(
 		nb_rx = rte_eth_rx_burst(port_id, 0, bufs, BURST_SIZE);
 		if (nb_rx > 0) {
 			/* Get time for packet trailers*/
-			current_tsc = rte_rdtsc_precise();
-			systime_ns += (current_tsc - tsc_start) * ns_per_tsc;
-			tsc_start = current_tsc;
+			clock_gettime(CLOCK_REALTIME, &ts);
+			systime_ns = timespec64_to_ns(&ts);
 			for (i = 0; i < nb_rx; ++i) {
 				default_metas[i].systime_ns = systime_ns + i;
 			}
 
 			/* Enqueue */
+			
 			n = rte_soring_enqueux_burst(packet_rings[pidx], bufs, default_metas, nb_rx, NULL);
 			if (unlikely(n < nb_rx)) {
 				debug_printf("Warning: packet ring full, dropping %u packets\n", nb_rx - n);
@@ -492,10 +489,12 @@ crinkle_rx(
 		}
 
 		/* Dequeue and Transmit */
+		
 		n = rte_soring_dequeux_burst(packet_rings[pidx], bufs, metas, BURST_SIZE, &nb_rem);
 		if (nb_rem > nb_warn) {
 			debug_printf("Warning: too many packets pending processing (%u)\n", nb_rem);
 		}
+		
 		if (n > 0) {
 			send_burst_replayable(bufs, systime_ns, replay_start, replay_end,
 									outport, queue_id, n);
