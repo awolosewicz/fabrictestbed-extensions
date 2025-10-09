@@ -39,7 +39,7 @@
 
 #define MONPROT 0x6587
 #define CREASEPROT 254
-#define CREASEVER "Crease Monitor v0.5.0\n"
+#define CREASEVER "Crease Monitor v0.6.0\n"
 
 #define MAX_PORTS 3
 
@@ -190,7 +190,6 @@ debug_printf(const char *fmt, ...)
 	vprintf(fmt, args);
 	va_end(args);
 	#endif
-
 }
 
 static inline void
@@ -452,7 +451,7 @@ crinkle_rx(
 	const uint16_t vport = devport_to_vport[port_id];
 	const uint16_t pidx = vport - 1;
 	const uint16_t outport = get_output_port_from_vport(vport);
-	uint64_t systime_ns, last_ns, tsc_start, current_tsc;
+	uint64_t systime_ns;
 	uint32_t n, nb_rx, nb_rem = 0, nb_warn;
 	uint16_t i;
 
@@ -924,7 +923,7 @@ main(int argc, char *argv[])
 	unsigned k;
 	int i, nb_rx;
 	lcore_id = rx_lcores[0];
-	uint64_t last_packets_rx[nb_ports], last_packets_tx[nb_ports];
+	uint64_t last_packets_rx[MAX_PORTS], last_packets_tx[MAX_PORTS];
 
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
