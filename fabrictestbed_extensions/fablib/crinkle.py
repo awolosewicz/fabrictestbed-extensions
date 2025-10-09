@@ -1173,7 +1173,7 @@ class CrinkleSlice(Slice):
             spade_control_commands = ('add reporter DSL /home/ubuntu/spade_pipe\n'
                                     'add analyzer CommandLine\n'
                                     'add storage PostgreSQL\n')
-            self.analyzer.execute(f'echo -e "{spade_control_commands}" | ./{REMOTEWORKDIR}/SPADE/bin/spade control', quiet=True)
+            self.analyzer.execute(f'./.crease/SPADE/bin/installPostgres; echo -e "{spade_control_commands}" | ./{REMOTEWORKDIR}/SPADE/bin/spade control', quiet=True)
             self.analyzer.upload_file(f"{CREASEDIR}/spade_reader.py", f"{REMOTEWORKDIR}/spade_reader.py")
             self.analyzer.execute(f"sudo chmod u+x {REMOTEWORKDIR}/spade_reader.py")
             if self.monitor_string == '':

@@ -141,9 +141,9 @@ def analyze_packet(pkt: Packet, monitors: dict[int, dict[int, tuple[str, str]]],
             #print(f'type:Artifact id:{fid} eth.type:{eth_type} ip.src:{ip_src} ip.dst:{ip_dst} ip.prot:{ip_prot} prot.sport:{prot_sport} prot.dport:{prot_dport}\n')
             output_lines.append(f'type:Artifact id:{fid} eth.type:{eth_type} ip.src:{ip_src} ip.dst:{ip_dst} ip.prot:{ip_prot} prot.sport:{prot_sport} prot.dport:{prot_dport}\n')
         # print('Writing spade edges')
-        #print(f'type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
+        print(f'type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
         output_lines.append(f'type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
-        #print(f'type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
+        print(f'type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
         output_lines.append(f'type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
 
     # ...rest of analysis...
@@ -156,11 +156,10 @@ def packet_worker(pkt_queue: queue.Queue, monitors, output_queue: queue.Queue):
             print("Worker exiting")
             break
         analyze_packet(pkt, monitors, output_queue)
-        pkt_queue.put(pkt)
         pkt_queue.task_done()
 
 def writer_worker(output_queue: queue.Queue):
-    with open("spade_pipe", 'a') as pipe:
+    with open("spade_pipe", 'w') as pipe:
         while True:
             lines = output_queue.get()
             if lines is None:
@@ -168,6 +167,7 @@ def writer_worker(output_queue: queue.Queue):
                 break
             for line in lines:
                 pipe.write(line)
+            pipe.flush()
             output_queue.task_done()
 
 if __name__ == "__main__":
@@ -175,43 +175,42 @@ if __name__ == "__main__":
     optpairs, args = getopt.getopt(sys.argv[1:], "m")
     monitors = {}
     ana_iface = ""
-    with open("spade_pipe", 'a') as pipe:
-        ana_iface = args[0]
-        idx = 1
-        id = -1
-        while idx < len(args):
-            iface_parts = args[idx].split('@', 1)
-            if len(iface_parts) == 1:
-                id = args[idx]
-                monitors[int(id)] = {}
-            else:
-                iface_id = iface_parts[0]
-                node = iface_parts[1].split('-', 1)[0]
-                print(f'type:Agent id:{node}\n')
-                pipe.write(f'type:Agent id:{node}\n')
-                print(f'type:Process id:{iface_parts[1]}\n')
-                pipe.write(f'type:Process id:{iface_parts[1]}\n')
-                print(f'type:WasControlledBy from:{iface_parts[1]} to:{node}\n')
-                pipe.write(f'type:WasControlledBy from:{iface_parts[1]} to:{node}\n')
-                monitors[int(id)][int(iface_id)] = iface_parts[1]
-            idx += 1
+    pkt_queue = queue.Queue()
+    output_queue = queue.Queue()
+    ana_iface = args[0]
+    num_workers = int(args[1])
+    idx = 2
+    id = -1
+    output_lines = []
+    while idx < len(args):
+        iface_parts = args[idx].split('@', 1)
+        if len(iface_parts) == 1:
+            id = args[idx]
+            monitors[int(id)] = {}
+        else:
+            iface_id = iface_parts[0]
+            node = iface_parts[1].split('-', 1)[0]
+            print(f'type:Agent id:{node}\n')
+            output_lines.append(f'type:Agent id:{node}\n')
+            print(f'type:Process id:{iface_parts[1]}\n')
+            output_lines.append(f'type:Process id:{iface_parts[1]}\n')
+            print(f'type:WasControlledBy from:{iface_parts[1]} to:{node}\n')
+            output_lines.append(f'type:WasControlledBy from:{iface_parts[1]} to:{node}\n')
+            monitors[int(id)][int(iface_id)] = iface_parts[1]
+        idx += 1
+    output_queue.put(output_lines)
     print(monitors)
     print(ana_iface)
     #sniff(prn=lambda x: analyze_packet(x, monitors), iface=ana_iface)
-
-    pkt_queue = queue.Queue()
-    output_queue = queue.Queue()
     workers = []
-    num_workers = 8
-    for _ in range(num_workers):
+    writer = threading.Thread(target=writer_worker, args=(output_queue,))
+    writer.daemon = True
+    writer.start()
+    for _ in range(num_workers - 1):
         t = threading.Thread(target=packet_worker, args=(pkt_queue, monitors, output_queue))
         t.daemon = True
         t.start()
         workers.append(t)
-
-    writer = threading.Thread(target=writer_worker, args=(output_queue,))
-    writer.daemon = True
-    writer.start()
 
     def enqueue_packet(pkt):
         pkt_queue.put(pkt)
