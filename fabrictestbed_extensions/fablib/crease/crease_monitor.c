@@ -457,8 +457,6 @@ crinkle_rx(
 
 	clock_gettime(CLOCK_REALTIME, &ts);
 	systime_ns = timespec64_to_ns(&ts);
-	tsc_start = rte_rdtsc_precise();
-	last_ns = systime_ns;
 
 	for (i = 0; i < BURST_SIZE; ++i) {
 		default_metas[i].systime_ns = 0;
