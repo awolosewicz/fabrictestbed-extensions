@@ -1137,7 +1137,7 @@ class CrinkleSlice(Slice):
                 for entry in refreshed_monitor.get_dataplane_os_interfaces():
                     ordered_devs[entry['ifname']] = ctr
                     ctr += 1
-                refreshed_monitor.data.cmd_args += f"-n {refreshed_monitor.data.monitor_id} "
+                refreshed_monitor.data.cmd_args += f"-r 1024 -n {refreshed_monitor.data.monitor_id} "
                 refreshed_monitor.data.cmd_args += f"-m {refreshed_monitor.data.cnet_iface.get_mac()} -m {self.analyzer_iface.get_mac()} "
                 refreshed_monitor.data.cmd_args += f"-i {refreshed_monitor.data.cnet_iface.get_ip_addr()} -i {self.analyzer_iface.get_ip_addr()} "
                 dev_name = refreshed_monitor.data.cnet_iface.get_device_name()
@@ -1172,7 +1172,7 @@ class CrinkleSlice(Slice):
             time.sleep(5)
             spade_control_commands = ('add reporter DSL /home/ubuntu/spade_pipe\n'
                                     'add analyzer CommandLine\n'
-                                    'add storage Neo4j database=/home/ubuntu/spade_database\n')
+                                    'add storage PostgreSQL\n')
             self.analyzer.execute(f'echo -e "{spade_control_commands}" | ./{REMOTEWORKDIR}/SPADE/bin/spade control', quiet=True)
             self.analyzer.upload_file(f"{CREASEDIR}/spade_reader.py", f"{REMOTEWORKDIR}/spade_reader.py")
             self.analyzer.execute(f"sudo chmod u+x {REMOTEWORKDIR}/spade_reader.py")
@@ -1629,7 +1629,7 @@ class CrinkleSlice(Slice):
         else:
             graph_build += '''\\$graph1 = \\$graph0\n'''
         graph_build += f'''\\$graph2 = \\$graph1.getLineage(\\$graph1.getVertex({spade_filter}), 1, 'b')\n\\$graph3 = \\$graph2 + \\$base.getPath(\\$graph2.getVertex(\\"type\\" == 'Process'), \\$base.getVertex(\\"type\\" == 'Agent'), 1)'''
-        self.analyzer.execute(f'echo -e "set storage Neo4j\n{graph_build}\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$graph3" | ./{REMOTEWORKDIR}/SPADE/bin/spade query; '
+        self.analyzer.execute(f'echo -e "set storage PostgreSQL\n{graph_build}\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$graph3" | ./{REMOTEWORKDIR}/SPADE/bin/spade query; '
                                 f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg', quiet=quiet)
         if download: self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
                 
@@ -1828,7 +1828,7 @@ class CrinkleSlice(Slice):
         """
         if self.monitor_string == '':
             self.reset_monitor_string()
-        self.analyzer.execute(f'''sudo killall python3; echo -e "remove storage Neo4j\n" | ./{REMOTEWORKDIR}/SPADE/bin/spade control; rm -rf {REMOTEWORKDIR}/spade_database/; echo -e "add storage Neo4j database=/home/ubuntu/{REMOTEWORKDIR}/spade_database\n" | ./{REMOTEWORKDIR}/SPADE/bin/spade control''', quiet=quiet)
+        self.analyzer.execute(f'''sudo killall python3; echo -e "remove storage PostgreSQL\n" | ./{REMOTEWORKDIR}/SPADE/bin/spade control; ./{REMOTEWORKDIR}/SPADE/bin/manage-postgres.sh clear; echo -e "add storage PostgreSQL\n" | ./{REMOTEWORKDIR}/SPADE/bin/spade control''', quiet=quiet)
         self.analyzer.execute_thread(f'sudo ./{REMOTEWORKDIR}/spade_reader.py {self.monitor_string}')
     
     def start_monitor(self, monitor: CrinkleMonitor, wait: bool=True, quiet: bool=False) -> futures.Future | None:
