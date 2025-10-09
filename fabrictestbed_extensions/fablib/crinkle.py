@@ -1632,6 +1632,7 @@ class CrinkleSlice(Slice):
         self.analyzer.execute(f'echo -e "set storage PostgreSQL\n{graph_build}\nexport > /home/ubuntu/{REMOTEWORKDIR}/{name}.dot\ndump all \\$graph3" | ./{REMOTEWORKDIR}/SPADE/bin/spade query; '
                                 f'dot -Tsvg {REMOTEWORKDIR}/{name}.dot -o {REMOTEWORKDIR}/{name}.svg', quiet=quiet)
         if download: self.analyzer.download_file(f'{name}.svg', f'{REMOTEWORKDIR}/{name}.svg')
+        print(f"Graph {name}.svg created")
                 
 
     def dump_provenance(
@@ -1648,9 +1649,10 @@ class CrinkleSlice(Slice):
         dict[pkt_id, list[pkt_info]],
         where pkt_info is a dict of the following fields:
             - time
-            - host
-            - interface
-            - direction (rx/tx)
+            - tx_host
+            - tx_interface
+            - rx_host
+            - rx_interface
             - size
             - epoch
             - flow fields (src/dst ip, src/dst port, protocol)
@@ -1662,6 +1664,7 @@ class CrinkleSlice(Slice):
         prov_dict: dict[str, list[dict[str, str]]] = {}
         iface_host_map: dict[str, str] = {}
         flow_map: dict[str, dict[str, str]] = {}
+        flow_tx_map: dict[str, dict[str, dict[str, str]]] = {}
         flow_keys = ['eth.type', 'ip.prot', 'ip.src', 'ip.dst', 'prot.sport', 'prot.dport']
         with open(f'{name}.dot', 'r') as f:
             lines = f.readlines()
@@ -1722,18 +1725,9 @@ class CrinkleSlice(Slice):
                             artifact = edge.group(2)
                             if 'pkt_id' not in label_dict: continue
                             pkt_id = label_dict['pkt_id']
-                            if pkt_id not in prov_dict: prov_dict[pkt_id] = []
-                            prov_dict[pkt_id].append({
-                                'host': iface_host_map.get(iface, 'unknown'),
-                                'interface': iface,
-                                'direction': "RX",
-                                'size': label_dict.get('size', "0"),
-                                'epoch': label_dict.get('epoch', "0"),
-                                'time': label_dict.get('time', "0"),
-                            })
-                            if artifact in flow_map:
-                                for key, value in flow_map[artifact].items():
-                                    prov_dict[pkt_id][-1][key] = value
+                            if artifact not in flow_tx_map: flow_tx_map[artifact] = {}
+                            if pkt_id not in flow_tx_map[artifact]: flow_tx_map[artifact][pkt_id] = {}
+                            flow_tx_map[artifact][pkt_id] = {'time': iface}
                         elif label_dict['type'] == 'WasGeneratedBy':
                             edge = re.search(r'"([^"]*)"\s*->\s*"([^"]*)"', line)
                             if not edge: continue
@@ -1743,18 +1737,25 @@ class CrinkleSlice(Slice):
                             pkt_id = label_dict['pkt_id']
                             if pkt_id not in prov_dict: prov_dict[pkt_id] = []
                             prov_dict[pkt_id].append({
-                                'host': iface_host_map.get(iface, 'unknown'),
-                                'interface': iface,
-                                'direction': "TX",
+                                'tx_host': iface_host_map.get(iface, ''),
+                                'tx_interface': iface,
+                                'rx_host': '',
+                                'rx_interface': '',
                                 'size': label_dict.get('size', "0"),
                                 'epoch': label_dict.get('epoch', "0"),
                                 'time': label_dict.get('time', "0"),
+                                'artifact': artifact,
                             })
                             if artifact in flow_map:
                                 for key, value in flow_map[artifact].items():
                                     prov_dict[pkt_id][-1][key] = value
         for pkt_id in prov_dict:
-            prov_dict[pkt_id] = sorted(prov_dict[pkt_id], key=lambda x: x['time'])
+            prov_dict[pkt_id] = sorted(prov_dict[pkt_id], key=lambda x: (x['time']))
+            for entry in prov_dict[pkt_id]:
+                if entry['artifact'] in flow_tx_map and pkt_id in flow_tx_map[entry['artifact']]:
+                    entry['rx_host'] = iface_host_map.get(flow_tx_map[entry['artifact']][pkt_id]['time'], '')
+                    entry['rx_interface'] = flow_tx_map[entry['artifact']][pkt_id]['time']
+                    del entry['artifact']
         return prov_dict
     
     def list_provenance(
@@ -1778,9 +1779,10 @@ class CrinkleSlice(Slice):
             pretty_names_dict = {
                 "pkt_id": "Packet ID",
                 "time": "Time",
-                "host": "Host",
-                "interface": "Interface",
-                "direction": "Direction",
+                "tx_host": "TX Host",
+                "tx_interface": "TX Interface",
+                "rx_host": "RX Host",
+                "rx_interface": "RX Interface",
                 "size": "Size",
                 "epoch": "Epoch",
                 "eth.type": "Ether Type",
@@ -1797,7 +1799,7 @@ class CrinkleSlice(Slice):
                 rowdict.update(pkt_info)
                 table.append(rowdict)
 
-        table = sorted(table, key=lambda x: (x["pkt_id"], x["time"], x["direction"]))
+        table = sorted(table, key=lambda x: (x["pkt_id"], x["time"]))
         table = self.get_fablib_manager().list_table(
             table,
             fields=fields,
