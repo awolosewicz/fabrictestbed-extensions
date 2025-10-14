@@ -1152,7 +1152,7 @@ class CrinkleSlice(Slice):
                     raise Exception(f"Monitor {refreshed_monitor.get_name()} failed to attach interfaces - please try another site")
                 refreshed_monitor.data.cmd_args += f"-d {refreshed_monitor.data.port_nums}@{ordered_devs[dev_name]} "
                 refreshed_monitor.data.port_nums += 1
-                self.monitor_string += f'{refreshed_monitor.data.monitor_id} '
+                self.monitor_string += f' {refreshed_monitor.data.monitor_id}'
                 for data in monitor.creation_data:
                     logging.info(f"Initializing monitor after slice creation with data: {data}")
                     mon_iface = refreshed_monitor.get_component(name=data[MonNetData.MIFACENAME]).get_interfaces()[0]
@@ -1160,13 +1160,11 @@ class CrinkleSlice(Slice):
                     refreshed_monitor.data.cmd_args += f"-d {refreshed_monitor.data.port_nums}@{ordered_devs[dev_name]} "
                     refreshed_monitor.data.iface_mappings[data[MonNetData.IFACENAME]] = (
                         data[MonNetData.NODENAME], mon_iface, data[MonNetData.ISSINK], refreshed_monitor.data.port_nums)
-                    self.monitor_string += f'{refreshed_monitor.data.port_nums}@{data[MonNetData.IFACENAME]} '
+                    self.monitor_string += f' {refreshed_monitor.data.port_nums}@{data[MonNetData.IFACENAME]}'
                     refreshed_monitor.data.port_nums += 1
-                self.monitor_string += ' '
                 self.monitors[key] = refreshed_monitor
                 refreshed_monitor.set_monitor_data()
                 counter += 1
-            self.monitor_string = self.monitor_string.rstrip()
             logging.info(f"Crinkle post_boot_config waiting on jobs to finish")
             print("Configuring Crinkle Resources")
             ctr = 0
@@ -1824,12 +1822,11 @@ class CrinkleSlice(Slice):
 
     def reset_monitor_string(self):
         logging.info("Crinkle tried to start with blank monitor string, regenerating it")
-        self.monitor_string = f"{self.analyzer_iface.get_device_name()} "
+        self.monitor_string = f"{self.analyzer_iface.get_device_name()} {self.analyzer.get_cores() - 1}"
         for monitor in self.monitors.values():
-            self.monitor_string += f'{monitor.data.monitor_id} '
+            self.monitor_string += f' {monitor.data.monitor_id}'
             for iface_name, (_, _, _, num) in monitor.data.iface_mappings.items():
-                self.monitor_string += f'{num}@{iface_name} '
-        self.monitor_string = self.monitor_string.rstrip()
+                self.monitor_string += f' {num}@{iface_name}'
 
     def reset_analyzer(self, quiet: bool = True):
         """
