@@ -1039,21 +1039,28 @@ class CrinkleSlice(Slice):
         # Make sure we have the latest topology
         self.update()
 
+        logging.info(f"post_boot_config: get_networks")
         for network in self.get_networks():
+            logging.info(f"post_boot_config: network {network.get_name()}")
             network.config()
 
+        logging.info(f"post_boot_config: get_interfaces")
         for interface in self.get_all_interfaces():
             try:
+                logging.info(f"post_boot_config: interface {interface.get_name()}")
                 interface.config_vlan_iface()
             except Exception as e:
                 logging.error(f"Interface: {interface.get_name()} failed to config")
                 logging.error(e, exc_info=True)
-
+        
+        logging.info(f"post_boot_config: unmanage interfaces")
         for interface in self.get_all_interfaces():
             try:
+                logging.info(f"post_boot_config: unmanage {interface.get_name()}")
                 interface.get_node().execute(
                     f"sudo nmcli device set {interface.get_device_name()} managed no",
                     quiet=True,
+                    timeout=30,
                 )
             except Exception as e:
                 logging.error(
