@@ -26,9 +26,12 @@ import json
 import logging
 import os
 import re
+import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Union
 
+import requests
 import yaml
 from atomicwrites import atomic_write
 
@@ -75,6 +78,10 @@ class Config:
         Constants.AM_HOST: {
             Constants.ENV_VAR: Constants.FABRIC_AM_HOST,
             Constants.DEFAULT: Constants.DEFAULT_FABRIC_AM_HOST,
+        },
+        Constants.CEPH_MGR_HOST: {
+            Constants.ENV_VAR: Constants.FABRIC_CEPH_MGR_HOST,
+            Constants.DEFAULT: Constants.DEFAULT_FABRIC_CEPH_MGR_HOST,
         },
         Constants.TOKEN_LOCATION: {
             Constants.ENV_VAR: Constants.FABRIC_TOKEN_LOCATION,
@@ -123,6 +130,10 @@ class Config:
             Constants.ENV_VAR: Constants.FABRIC_BASTION_SSH_CONFIG_FILE,
             Constants.DEFAULT: Constants.DEFAULT_FABRIC_BASTION_SSH_CONFIG_FILE,
         },
+        Constants.METADATA_TAG: {
+            Constants.ENV_VAR: Constants.FABRIC_METADATA_TAG,
+            Constants.DEFAULT: Constants.DEFAULT_FABRIC_METADATA_TAG,
+        },
     }
 
     REQUIRED_ATTRS_PRETTY_NAMES = {
@@ -130,6 +141,7 @@ class Config:
         Constants.ORCHESTRATOR_HOST: "Orchestrator",
         Constants.CORE_API_HOST: "Core API",
         Constants.AM_HOST: "Artifact Manager",
+        Constants.CEPH_MGR_HOST: "CEPH Manager",
         Constants.TOKEN_LOCATION: "Token File",
         Constants.PROJECT_ID: "Project ID",
         Constants.PROJECT_NAME: "Project Name",
@@ -147,7 +159,10 @@ class Config:
         Constants.DATA_DIR: "Data directory",
         Constants.SSH_COMMAND_LINE: "SSH Command Line",
         Constants.BASTION_SSH_CONFIG_FILE: "Bastion SSH Config File",
+        Constants.METADATA_TAG: "Fabric Meta Data Release Tag",
     }
+
+    os.makedirs(Constants.LOCAL_CACHE_DIR, exist_ok=True)
 
     def __init__(
         self,
@@ -156,6 +171,7 @@ class Config:
         orchestrator_host: str = None,
         core_api_host: str = None,
         am_host: str = None,
+        ceph_mgr_host: str = None,
         token_location: str = None,
         project_id: str = None,
         bastion_username: str = None,
@@ -198,6 +214,9 @@ class Config:
 
         if core_api_host is not None:
             self.set_core_api_host(core_api_host=core_api_host)
+
+        if ceph_mgr_host is not None:
+            self.set_ceph_mgr_host(ceph_mgr_host=ceph_mgr_host)
 
         if am_host is not None:
             self.set_am_host(am_host=am_host)
@@ -451,6 +470,23 @@ class Config:
         """
         self.runtime_config[Constants.CORE_API_HOST] = core_api_host
 
+    def set_ceph_mgr_host(self, ceph_mgr_host: str):
+        """
+        Sets the ceph_mgr host value.
+        :param ceph_mgr_host: ceph_mgr host
+        :type ceph_mgr_host: String
+        """
+        self.runtime_config[Constants.CEPH_MGR_HOST] = ceph_mgr_host
+
+    def get_ceph_mgr_host(self) -> str:
+        """
+        Gets the ceph_mgr host value.
+
+        :return: the ceph_mgr host site
+        :rtype: String
+        """
+        return self.runtime_config.get(Constants.CEPH_MGR_HOST)
+
     def get_am_host(self) -> str:
         """
         Gets the am host value.
@@ -543,6 +579,21 @@ class Config:
         ):
             return None
         return Utils.read_file_contents(file_path=self.get_bastion_key_location())
+
+    def get_bastion_public_key(self) -> Union[str, None]:
+        """
+        Reads the FABRIC Bastion public key file and returns the key.
+
+        :return: FABRIC Bastion key string
+        :rtype: String
+        """
+        if self.get_bastion_key_location() is None or not os.path.exists(
+            self.get_bastion_key_location()
+        ):
+            return None
+        return Utils.read_file_contents(
+            file_path=f"{self.get_bastion_key_location()}.pub"
+        )
 
     def get_bastion_host(self) -> str:
         """
@@ -740,14 +791,14 @@ class Config:
         return None
 
     @staticmethod
-    def get_image_names() -> List[str]:
+    def get_image_names() -> dict[str, dict]:
         """
         Gets a list of available image names.
 
         This is statically defined for now. Eventually, images will be managed dynamically.
 
-        :return: list of image names as strings
-        :rtype: list[str]
+        :return: Dictionary of images with default user and description
+        :rtype: dict[str, dict]
         """
         return Constants.IMAGE_NAMES
 
@@ -810,6 +861,99 @@ class Config:
                 format="[%(asctime)s] {%(pathname)s:%(lineno)d} %(levelname)s - %(message)s",
                 datefmt="%H:%M:%S",
             )
+
+    @staticmethod
+    def get_metadata_tag() -> str:
+        """
+        Get the metadata tag used to fetch remote configuration files.
+
+        This tag determines which version or branch (e.g., "main", "v1.0.0")
+        of the metadata directory is used.
+
+        :return: Metadata tag string.
+        :rtype: str
+        """
+        return os.environ.get(
+            Constants.FABRIC_METADATA_TAG, Constants.DEFAULT_FABRIC_METADATA_TAG
+        )
+
+    @staticmethod
+    def _fetch_or_load_json(
+        name: str, ttl: int = 86400, fallback_default: dict = {}
+    ) -> dict:
+        """
+        Fetch a JSON file from a remote URL, using local caching with time-based invalidation,
+        and fall back to a default if the fetch or cache read fails.
+
+        If a valid cached file exists within the TTL, it is used.
+        If not, the method tries to fetch from the remote GitHub metadata URL.
+        If the fetch fails, it returns either the cached file (if available) or the fallback default.
+
+        :param name: Name of the metadata file (without .json extension).
+        :type name: str
+        :param ttl: Time-to-live for cache in seconds (default is 86400 = 1 day).
+        :type ttl: int
+        :param fallback_default: Default dictionary to use if remote and cached fetches fail.
+        :type fallback_default: dict or None
+        :return: The loaded JSON data.
+        :rtype: dict
+        :raises RuntimeError: If no valid data can be fetched or loaded and no fallback is provided.
+        """
+        remote_url = Constants.FABRIC_METADATA_URL.format(Config.get_metadata_tag())
+        remote_url += f"/{name}.json"
+        local_file = os.path.join(Constants.LOCAL_CACHE_DIR, f"{name}.json")
+
+        # Check if cache file is fresh
+        if os.path.exists(local_file):
+            age = time.time() - os.path.getmtime(local_file)
+            if age < ttl:
+                with open(local_file, "r") as f:
+                    return json.load(f)
+
+        try:
+            response = requests.get(remote_url, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            with atomic_write(local_file, overwrite=True) as f:
+                json.dump(data, f, indent=2)
+            return data
+        except Exception:
+            if os.path.exists(local_file):
+                with open(local_file, "r") as f:
+                    return json.load(f)
+            elif fallback_default is not None:
+                return fallback_default
+            else:
+                raise RuntimeError(f"Could not retrieve or load {name}.json")
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def get_os_images() -> dict:
+        """
+        Get a dictionary of supported OS images from cached metadata.
+
+        The data is fetched from a remote GitHub metadata source or returned from local cache.
+        Falls back to a static default (Constants.IMAGE_NAMES) if both fail.
+
+        :return: Dictionary of image metadata.
+        :rtype: dict
+        """
+        return Config._fetch_or_load_json(
+            "os_images", fallback_default=Constants.IMAGE_NAMES
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def get_facility_port_details() -> dict:
+        """
+        Get the facility port metadata including descriptions and mappings.
+
+        Uses remote metadata cache if available, falling back to an empty dictionary.
+
+        :return: Dictionary of facility port details.
+        :rtype: dict
+        """
+        return Config._fetch_or_load_json("facility_ports", fallback_default={})
 
 
 if __name__ == "__main__":

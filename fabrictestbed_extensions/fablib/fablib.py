@@ -68,16 +68,21 @@ import json
 import logging
 import os
 import random
+import shutil
 import sys
+import tarfile
 import threading
 import traceback
 import warnings
 
+from fabric_ceph_client.fabric_ceph_client import CephManagerClient
 from fabrictestbed.external_api.artifact_manager import Visibility
 from fabrictestbed.fabric_manager import FabricManager
+from fss_utils.sshkey import FABRICSSHKey
 
 from fabrictestbed_extensions.fablib.artifact import Artifact
 from fabrictestbed_extensions.fablib.site import Host, Site
+from fabrictestbed_extensions.utils.ceph_fs_utils import CephFsUtils
 
 warnings.filterwarnings("always", category=DeprecationWarning)
 
@@ -125,12 +130,12 @@ class fablib:
         return fablib.default_fablib_manager
 
     @staticmethod
-    def get_image_names() -> List[str]:
+    def get_image_names() -> dict[str, dict]:
         """
         Gets a list of available image names.
 
-        :return: list of image names as strings
-        :rtype: list[str]
+        :return: Dictionary of images with default user and description
+        :rtype: dict[str, dict]
         """
         return fablib.get_default_fablib_manager().get_image_names()
 
@@ -233,7 +238,7 @@ class fablib:
         Get a random site.
 
         :param avoid: list of site names to avoid choosing
-        :type site_name: List[String]
+        :type avoid: List[String]
         :return: one site name
         :rtype: String
         """
@@ -622,6 +627,7 @@ class FablibManager(Config):
         orchestrator_host: str = None,
         core_api_host: str = None,
         am_host: str = None,
+        ceph_mgr_host: str = None,
         token_location: str = None,
         project_id: str = None,
         bastion_username: str = None,
@@ -633,6 +639,7 @@ class FablibManager(Config):
         execute_thread_pool_size: int = 64,
         offline: bool = False,
         auto_token_refresh: bool = True,
+        validate_config: bool = True,
         **kwargs,
     ):
         """
@@ -661,6 +668,7 @@ class FablibManager(Config):
         :param orchestrator_host: Name of FABRIC orchestrator host.
         :param core_api_host: Name of Core API host.
         :param am_host: Name of Aggregate Manager host.
+        :param ceph_mgr_host: Name of ceph manager host.
         :param token_location: Path to the file that contains your
             FABRIC auth token.
         :param project_id: Your FABRIC project ID, obtained from
@@ -685,6 +693,7 @@ class FablibManager(Config):
             This is ``False`` by default, and set to ``True`` only in
             some unit tests.
         :param auto_token_refresh: Auto refresh tokens
+        :param validate_config: Whether to verify and persist configuration during initialization.
         """
         super().__init__(
             fabric_rc=fabric_rc,
@@ -692,6 +701,7 @@ class FablibManager(Config):
             orchestrator_host=orchestrator_host,
             core_api_host=core_api_host,
             am_host=am_host,
+            ceph_mgr_host=ceph_mgr_host,
             token_location=token_location,
             project_id=project_id,
             bastion_username=bastion_username,
@@ -723,6 +733,8 @@ class FablibManager(Config):
         if not offline:
             self.ssh_thread_pool_executor = ThreadPoolExecutor(execute_thread_pool_size)
             self.__build_manager()
+            if validate_config:
+                self.verify_and_configure(validate_only=True)
         self.required_check()
         self.lock = threading.Lock()
         # These dictionaries are maintained to keep cache of the slice objects created
@@ -822,7 +834,7 @@ class FablibManager(Config):
         )
         self.verify_and_configure()
 
-    def verify_and_configure(self):
+    def verify_and_configure(self, validate_only: bool = False):
         """
         Validate and create Fablib config - checks if all the required configuration exists for slice
         provisioning to work successfully
@@ -843,7 +855,10 @@ class FablibManager(Config):
 
         - Check Project Id is configured
 
-        @raises Exception if the configuration is invalid
+        :param validate_only: flag to specify to only do config validation
+        :type validate_only: bool
+
+        :raises Exception if the configuration is invalid
         """
         Utils.is_reachable(hostname=self.get_credmgr_host(), port=443)
         Utils.is_reachable(hostname=self.get_orchestrator_host(), port=443)
@@ -863,7 +878,7 @@ class FablibManager(Config):
                 "Sliver Key and Bastion key can not be same! Please use different key names!"
             )
 
-        self.validate_and_update_bastion_keys()
+        self.validate_and_update_bastion_keys(validate_only=validate_only)
 
         if (
             self.get_default_slice_public_key() is None
@@ -880,9 +895,10 @@ class FablibManager(Config):
             logging.info("Project is not specified")
             raise Exception("Bastion User name is not specified")
 
-        self.create_ssh_config(overwrite=True)
-
-        print("Configuration is valid and please save the config!")
+        print("Configuration is valid")
+        if not validate_only:
+            self.create_ssh_config(overwrite=True)
+            print("Please save the config!")
 
     def get_user_info(self) -> dict:
         """
@@ -908,6 +924,116 @@ class FablibManager(Config):
         self.set_bastion_username(
             bastion_username=user_info.get(Constants.BASTION_LOGIN)
         )
+
+    def create_ssh_tunnel_config(self, overwrite: bool = False):
+        """
+        Create zip file containing SSH keys and SSH config file to use for SSH tunnels
+
+        :param overwrite: overwrite the configuration if True, return otherwise
+        :type overwrite: bool
+        """
+        bastion_ssh_config_file = self.get_bastion_ssh_config_file()
+        if bastion_ssh_config_file is None:
+            raise ConfigException("Bastion SSH Config File location not specified")
+
+        bastion_key_file = self.get_bastion_key_location()
+        if bastion_key_file is None or not os.path.exists(bastion_key_file):
+            raise ConfigException(
+                "Bastion SSH Key File location not specified or the file does not exist"
+            )
+
+        dir_path = os.path.dirname(bastion_ssh_config_file)
+        file_name = os.path.basename(bastion_ssh_config_file)
+        dir_path = os.path.join(dir_path, "fabric_ssh_tunnel_tools")
+        bastion_key_file_name = os.path.basename(bastion_key_file)
+
+        if os.path.exists(dir_path) and not overwrite:
+            logging.info(
+                f"{dir_path} already exists and overwrite=False. Skipping creation."
+            )
+            return
+
+        if not os.path.exists(dir_path):
+            try:
+                os.makedirs(dir_path)
+            except OSError as e:
+                msg = f"Failed to create directory {dir_path}: {e}"
+                logging.error(msg)
+                raise Exception(msg)
+
+        # Copy private key
+        dest_key_path = os.path.join(dir_path, bastion_key_file_name)
+        shutil.copy2(bastion_key_file, dest_key_path)
+
+        # Copy public key if it exists
+        public_key_file = f"{bastion_key_file}.pub"
+        if os.path.exists(public_key_file):
+            shutil.copy2(
+                public_key_file,
+                os.path.join(dir_path, os.path.basename(public_key_file)),
+            )
+
+        # Get slice public key path
+        slice_pub_key_file = self.get_default_slice_public_key_file()
+        if slice_pub_key_file is None or not os.path.exists(slice_pub_key_file):
+            raise ConfigException(
+                "Slice public key file is not specified or does not exist"
+            )
+
+        # Derive slice private key path by removing ".pub"
+        slice_key_file = slice_pub_key_file[:-4]  # removes ".pub"
+        if not os.path.exists(slice_key_file):
+            raise ConfigException("Slice private key file does not exist")
+
+        # Copy slice public and private keys
+        shutil.copy2(
+            slice_key_file, os.path.join(dir_path, os.path.basename(slice_key_file))
+        )
+        shutil.copy2(
+            slice_pub_key_file,
+            os.path.join(dir_path, os.path.basename(slice_pub_key_file)),
+        )
+
+        # Write SSH config
+        ssh_config_path = os.path.join(dir_path, file_name)
+        with open(ssh_config_path, "w") as f:
+            f.write(
+                f"""UserKnownHostsFile /dev/null
+StrictHostKeyChecking no
+ServerAliveInterval 120
+
+Host bastion.fabric-testbed.net
+     User {self.get_bastion_username()}
+     ForwardAgent yes
+     Hostname %h
+     IdentityFile {bastion_key_file_name}
+     IdentitiesOnly yes
+
+Host * !bastion.fabric-testbed.net
+     ProxyJump {self.get_bastion_username()}@bastion.fabric-testbed.net:22
+    """
+            )
+
+        # Tar the directory
+        tgz_path = f"{dir_path}.tgz"
+        with tarfile.open(tgz_path, "w:gz") as tar:
+            tar.add(dir_path, arcname=os.path.basename(dir_path))
+
+        # Usage instructions
+        msg = f"""
+SSH tunnel config created and zipped at: {tgz_path}
+
+Download Instructions:
+Download your custom `fabric_ssh_tunnel_tools.tgz` file from the `fabric_config` folder. 
+
+Usage Instructions:
+1. Unzip the archive and place the resulting `fabric_ssh_tunnel_tools/` folder somewhere accessible from your terminal.
+2. Open a terminal window (on Windows, use PowerShell).
+3. Use `cd` to navigate into the `fabric_ssh_tunnel_tools` folder.
+4. In your terminal, run the SSH tunnel command generated by the next notebook cell.
+    """
+        print(msg)
+        logging.info(f"SSH tunnel config created at {tgz_path}")
 
     def create_ssh_config(self, overwrite: bool = False):
         """
@@ -955,17 +1081,20 @@ Host * !bastion.fabric-testbed.net
     """
             )
 
-    def validate_and_update_bastion_keys(self):
+    def validate_and_update_bastion_keys(self, validate_only: bool = False):
         """
-        Validate Bastion Key; if key does not exist or is expired, it create bastion keys
+        Validate Bastion Key; if key does not exist or is expired, it creates bastion keys
+
+        :param validate_only: flag to specify to only do config validation
+        :type validate_only: bool
+
         """
         logging.info("Fetching User's information")
         user_info = self.get_user_info()
         logging.debug("Updating Bastion User Name")
         ssh_keys = user_info.get(Constants.SSH_KEYS)
 
-        current_bastion_key = self.get_bastion_key()
-        current_bastion_key_file = self.get_bastion_key_location()
+        current_bastion_key = self.get_bastion_public_key()
 
         keys_to_remove = []
         for key in ssh_keys:
@@ -984,10 +1113,11 @@ Host * !bastion.fabric-testbed.net
             ssh_keys.remove(key)
 
         found = False
-        if current_bastion_key_file is not None:
-            current_bastion_key_name = os.path.basename(current_bastion_key_file)
+        if current_bastion_key:
+            fabric_ssh_key = FABRICSSHKey(current_bastion_key)
             found = any(
-                item["comment"] == current_bastion_key_name for item in ssh_keys
+                item["fingerprint"] == fabric_ssh_key.get_fingerprint()
+                for item in ssh_keys
             )
 
         if current_bastion_key is not None and found:
@@ -997,13 +1127,13 @@ Host * !bastion.fabric-testbed.net
             print(f"User: {user_info.get(Constants.EMAIL)} bastion key is valid!")
             return
 
-        logging.info(
-            f"User: {user_info.get(Constants.EMAIL)} bastion keys do not exist or are expired"
-        )
-        print(
-            f"User: {user_info.get(Constants.EMAIL)} bastion keys do not exist or are expired"
-        )
-        self.create_bastion_keys(overwrite=True)
+        msg = f"User: {user_info.get(Constants.EMAIL)} bastion keys do not exist or are expired."
+        logging.info(msg)
+        print(msg)
+        if not validate_only:
+            self.create_bastion_keys(overwrite=True)
+        else:
+            print("Please call `verify_and_configure` to renew your bastion keys!")
 
     def create_bastion_keys(
         self,
@@ -3309,4 +3439,92 @@ Host * !bastion.fabric-testbed.net
             artifact_title=artifact_title,
             version=version,
             version_urn=version_urn,
+        )
+
+    def discover_ceph_clusters(self, verify: bool = True) -> list:
+        """
+        Discover Ceph clusters via the Ceph Manager API.
+
+        Calls :py:meth:`CephFsUtils.list_clusters_from_api` using this object's
+        Ceph Manager base URL and token file.
+
+        :param bool verify: Verify TLS certificates when calling the API.
+                            Defaults to ``False`` (set to ``True`` in production).
+        :return: List of cluster name
+        :rtype: list
+        :raises RuntimeError: If the API call fails.
+        """
+        return CephFsUtils.list_clusters_from_api(
+            base_url=self.get_ceph_mgr_host(),
+            token_file=self.get_token_location(),  # or token=...
+            verify=verify,
+        )
+
+    def generate_ceph_bundle(
+        self,
+        cluster: str,
+        out_base: str = "./ceph-artifacts",
+        mount_root: str = "/mnt/cephfs",
+        verify: bool = True,
+    ) -> dict:
+        """
+        Generate a local bundle for mounting CephFS paths for the current user
+        on a specific cluster.
+
+        This:
+          1. Fetches the minimal ``ceph.conf`` for ``region``.
+          2. Exports the user's keyring from that cluster.
+          3. Writes files under ``out_base/<region>/``:
+             ``ceph.conf``, ``ceph.client.<user>.secret``,
+             ``ceph.client.<user>.keyring``, and a mount script
+             ``mount_<user>.sh`` that mounts every path found in the MDS caps.
+
+        :param str region: Target cluster name (e.g., ``"europe"``).
+        :param str out_base: Output root directory for artifacts
+                             (default: ``"./ceph-artifacts"``).
+        :param str mount_root: Mount prefix used by the generated script
+                               (default: ``"/mnt/cephfs"``).
+        :param bool verify: Verify TLS certificates when calling the API.
+                            Defaults to ``False`` (set to ``True`` in production).
+        :return: Details of the generated bundle, for example::
+
+            {
+              "cluster_dir": "./ceph-artifacts/europe",
+              "ceph_conf": "./ceph-artifacts/europe/ceph.conf",
+              "secret_file": "./ceph-artifacts/europe/ceph.client.alice.secret",
+              "keyring_file": "./ceph-artifacts/europe/ceph.client.alice.keyring",
+              "mount_script": "./ceph-artifacts/europe/mount_alice.sh",
+              "entity": "client.alice",
+              "user": "alice",
+              "mounts": [
+                {
+                  "fsname": "CEPH-FS-01",
+                  "path": "/volumes/_nogroup/alice/....",
+                  "mount_point": "/mnt/cephfs/europe/alice/volumes__nogroup_alice____"
+                },
+                ...
+              ]
+            }
+        :rtype: dict
+        :raises ValueError: If ``region`` is unknown or the user name is empty.
+        :raises RuntimeError: If no clusters are discovered or keyring is unavailable.
+        """
+        # Accept either "alice" or "client.alice" from your accessor
+        user_entity = self.get_bastion_username()
+        if not user_entity:
+            self.determine_bastion_username()
+            user_entity = self.get_bastion_username()
+        if not user_entity:
+            raise ValueError("User/bastion login is empty.")
+        if not user_entity.startswith("client."):
+            user_entity = f"client.{user_entity}"
+
+        return CephFsUtils.build_for_user_from_api(
+            base_url=self.get_ceph_mgr_host(),
+            user_entity=user_entity,
+            cluster=cluster,
+            token_file=self.get_token_location(),  # or token=...
+            verify=verify,
+            out_base=out_base,
+            mount_root_default=mount_root,
         )

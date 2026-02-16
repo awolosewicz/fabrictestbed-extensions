@@ -31,6 +31,7 @@ class Constants:
     DEFAULT_FABRIC_ORCHESTRATOR_HOST = "orchestrator.fabric-testbed.net"
     DEFAULT_FABRIC_CORE_API_HOST = "uis.fabric-testbed.net"
     DEFAULT_FABRIC_AM_HOST = "artifacts.fabric-testbed.net"
+    DEFAULT_FABRIC_CEPH_MGR_HOST = "23.134.232.211"
     DEFAULT_FABRIC_BASTION_HOST = "bastion.fabric-testbed.net"
     DEFAULT_LOG_LEVEL = "INFO"
     DEFAULT_LOG_FILE = "/tmp/fablib/fablib.log"
@@ -43,6 +44,8 @@ class Constants:
     DEFAULT_SLICE_PUBLIC_KEY_FILE = f"{DEFAULT_SLICE_PRIVATE_KEY_FILE}.pub"
     DEFAULT_BASTION_KEY_LOCATION = f"{DEFAULT_FABRIC_CONFIG_DIR}/fabric_bastion_key"
     DEFAULT_FABRIC_BASTION_SSH_CONFIG_FILE = f"{DEFAULT_FABRIC_CONFIG_DIR}/ssh_config"
+    DEFAULT_FABRIC_METADATA_TAG = "main"
+
     DEFAULT_FABRIC_SSH_COMMAND_LINE = (
         "ssh -i {{ _self_.private_ssh_key_file }} -F "
         + DEFAULT_FABRIC_BASTION_SSH_CONFIG_FILE
@@ -53,6 +56,7 @@ class Constants:
     FABRIC_ORCHESTRATOR_HOST = "FABRIC_ORCHESTRATOR_HOST"
     FABRIC_CORE_API_HOST = "FABRIC_CORE_API_HOST"
     FABRIC_AM_HOST = "FABRIC_AM_HOST"
+    FABRIC_CEPH_MGR_HOST = "FABRIC_CEPH_MGR_HOST"
     FABRIC_TOKEN_LOCATION = "FABRIC_TOKEN_LOCATION"
     FABRIC_PROJECT_ID = "FABRIC_PROJECT_ID"
     FABRIC_BASTION_HOST = "FABRIC_BASTION_HOST"
@@ -67,6 +71,7 @@ class Constants:
     FABRIC_SSH_COMMAND_LINE = "FABRIC_SSH_COMMAND_LINE"
     FABLIB_VERSION = "fablib_version"
     FABRIC_BASTION_SSH_CONFIG_FILE = "FABRIC_BASTION_SSH_CONFIG_FILE"
+    FABRIC_METADATA_TAG = "FABRIC_METADATA_TAG"
 
     FABRIC_PRIMARY = "#27aae1"
     FABRIC_PRIMARY_LIGHT = "#cde4ef"
@@ -108,6 +113,7 @@ class Constants:
     CREDMGR_HOST = "credmgr_host"
     ORCHESTRATOR_HOST = "orchestrator_host"
     CORE_API_HOST = "core_api_host"
+    CEPH_MGR_HOST = "ceph_mgr_host"
     AM_HOST = "am_host"
     TOKEN_LOCATION = "token_location"
     PROJECT_ID = "project_id"
@@ -127,30 +133,79 @@ class Constants:
     SLICE_PUBLIC_KEY = "slice_public_key"
     SLICE_PRIVATE_KEY_PASSPHRASE = "slice_private_key_passphrase"
     BASTION_SSH_CONFIG_FILE = "bastion_ssh_config_file"
+    METADATA_TAG = "metadata_tag"
 
-    IMAGE_NAMES = [
-        "default_centos8_stream",
-        "default_centos9_stream",
-        "default_centos_7",
-        "default_centos_8",
-        "default_debian_11",
-        "default_debian_12",
-        "default_fedora_39",
-        "default_fedora_40",
-        "default_freebsd_13_zfs",
-        "default_freebsd_14_zfs",
-        "default_kali",
-        "default_openbsd_7",
-        "default_rocky_8",
-        "default_rocky_9",
-        "default_ubuntu_20",
-        "default_ubuntu_22",
-        "default_ubuntu_24",
-        "docker_rocky_8",
-        "docker_rocky_9",
-        "docker_ubuntu_20",
-        "docker_ubuntu_22",
-    ]
+    IMAGE_NAMES = {
+        "default_centos8_stream": {
+            "description": "CentOS 8 Stream (non-stream)",
+            "default_user": "centos",
+        },
+        "default_centos9_stream": {
+            "description": "CentOS 9 Stream (default install)",
+            "default_user": "cloud-user",
+        },
+        "default_centos10_stream": {
+            "description": "CentOS 10 Stream (default install)",
+            "default_user": "cloud-user",
+        },
+        "default_debian_11": {
+            "description": "Debian 11 Bullseye",
+            "default_user": "debian",
+        },
+        "default_debian_12": {
+            "description": "Debian 12 Bookworm",
+            "default_user": "debian",
+        },
+        "default_fedora_39": {"description": "Fedora 39", "default_user": "fedora"},
+        "default_fedora_40": {"description": "Fedora 40", "default_user": "fedora"},
+        "default_freebsd_13_zfs": {
+            "description": "FreeBSD 13 with ZFS",
+            "default_user": "freebsd",
+        },
+        "default_freebsd_14_zfs": {
+            "description": "FreeBSD 14 with ZFS",
+            "default_user": "freebsd",
+        },
+        "default_kali": {
+            "description": "Kali Linux (for penetration testing)",
+            "default_user": "kali",
+        },
+        "default_openbsd_7": {"description": "OpenBSD 7", "default_user": "openbsd"},
+        "default_rocky_8": {"description": "Rocky Linux 8", "default_user": "rocky"},
+        "default_rocky_9": {"description": "Rocky Linux 9", "default_user": "rocky"},
+        "default_ubuntu_20": {
+            "description": "Ubuntu 20.04 LTS Focal Fossa",
+            "default_user": "ubuntu",
+        },
+        "default_ubuntu_22": {
+            "description": "Ubuntu 22.04 LTS Jammy Jellyfish",
+            "default_user": "ubuntu",
+        },
+        "default_ubuntu_24": {
+            "description": "Ubuntu 24.04 LTS Noble Numbat",
+            "default_user": "ubuntu",
+        },
+        "docker_rocky_8": {
+            "description": "Rocky Linux 8 Docker image",
+            "default_user": "rocky",
+        },
+        "docker_rocky_9": {
+            "description": "Rocky Linux 9 Docker image",
+            "default_user": "rocky",
+        },
+        "docker_ubuntu_20": {
+            "description": "Ubuntu 20.04 LTS Docker image",
+            "default_user": "ubuntu",
+        },
+        "docker_ubuntu_22": {
+            "description": "Ubuntu 22.04 LTS Docker image",
+            "default_user": "ubuntu",
+        },
+        "attestable_bmv2_v1_ubuntu_20": {
+            "description": "Ubuntu 20.04 LTS Focal Fossa with BMv2 essentials",
+            "default_user": "ubuntu",
+        },
+    }
 
     ENV_VAR = "env_var"
     DEFAULT = "default"
@@ -179,6 +234,9 @@ class Constants:
     NIC_SHARED_CONNECTX_6 = "SharedNIC-ConnectX-6"
     SMART_NIC_CONNECTX_6 = "SmartNIC-ConnectX-6"
     SMART_NIC_CONNECTX_5 = "SmartNIC-ConnectX-5"
+    SMART_NIC_CONNECTX_7_100 = "SmartNIC-ConnectX-7-100"
+    SMART_NIC_CONNECTX_7_400 = "SmartNIC-ConnectX-7-400"
+    SMART_NIC_BlueField2_CONNECTX_6 = "SmartNIC-BlueField2-ConnectX-6"
     NVME_P4510 = "NVME-P4510"
     GPU_TESLA_T4 = "GPU-Tesla T4"
     GPU_RTX6000 = "GPU-RTX6000"
@@ -194,7 +252,9 @@ class Constants:
     P4_SWITCH = "P4-Switch"
 
     CMP_NIC_Basic = "NIC_Basic"
-    CMP_NIC_BlueField2_ConnectX_6 = "NIC_BlueField2_ConnectX_6"
+    CMP_NIC_BlueField2_ConnectX_6 = "NIC_BlueField_2_ConnectX_6"
+    CMP_NIC_ConnectX_7_400 = "NIC_ConnectX_7_400"
+    CMP_NIC_ConnectX_7_100 = "NIC_ConnectX_7_100"
     CMP_NIC_ConnectX_6 = "NIC_ConnectX_6"
     CMP_NIC_ConnectX_5 = "NIC_ConnectX_5"
     CMP_NIC_P4 = "NIC_P4"
@@ -209,3 +269,5 @@ class Constants:
     P4_DedicatedPort = "P4_DedicatedPort"
 
     FABRIC_USER = "fabric"
+    FABRIC_METADATA_URL = "https://raw.githubusercontent.com/fabric-testbed/fabric-global-metadata/{}/metadata"
+    LOCAL_CACHE_DIR = os.path.expanduser("~/.fabric/cache")
