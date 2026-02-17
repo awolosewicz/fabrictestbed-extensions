@@ -542,7 +542,7 @@ class Component:
         :rtype: String
         """
         fim_model = str(self.get_fim_model()).replace("-", "_").replace(" ", "")
-        component_type = str(self.dict["type"])
+        component_type = str(self.get_type())
 
         prefix_map = {
             str(ComponentType.SmartNIC): "NIC_",
