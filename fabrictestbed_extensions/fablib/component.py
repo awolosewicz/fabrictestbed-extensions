@@ -579,17 +579,17 @@ class Component:
         :rtype: String
         """
         fim_model = str(self.get_fim_model()).replace("-", "_").replace(" ", "")
-        component_type = str(self.get_type())
+        component_type = self.get_type()
 
         prefix_map = {
-            str(ComponentType.SmartNIC): "NIC_",
-            str(ComponentType.NVME): "NVME_",
-            str(ComponentType.GPU): "GPU_",
-            str(ComponentType.FPGA): "FPGA_",
-            str(ComponentType.Storage): "Storage_",
+            ComponentType.SmartNIC: "NIC_",
+            ComponentType.NVME: "NVME_",
+            ComponentType.GPU: "GPU_",
+            ComponentType.FPGA: "FPGA_",
+            ComponentType.Storage: "Storage_",
         }
 
-        if component_type == str(ComponentType.SharedNIC):
+        if component_type == ComponentType.SharedNIC:
             return Constants.CMP_NIC_Basic
 
         prefix = prefix_map.get(component_type)
