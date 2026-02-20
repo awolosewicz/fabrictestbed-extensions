@@ -18,6 +18,7 @@ from scapy.fields import ShortField, LongField, XShortField, IntField
 PROT_CMA = 254
 CMA_ID = b"\x65\x87"
 
+
 class CMA(Packet):
     name = "CMA"
     fields_desc = [
@@ -30,8 +31,9 @@ class CMA(Packet):
         ShortField("uid_mon", 0),
         ShortField("uid_port", 0),
         ShortField("time_chk", 0),
-        XShortField("cma", CMA_ID)
+        XShortField("cma", CMA_ID),
     ]
+
 
 class PktLayers(enum.IntEnum):
     ETHER_O = 0
@@ -41,6 +43,7 @@ class PktLayers(enum.IntEnum):
     IP_I = 4
     PROT_I = 5
     RAW_I = 6
+
 
 class Flow:
     def __init__(self, txport, rxport, ip_src, ip_dst, ip_prot, prot_sport, prot_dport):
@@ -53,20 +56,49 @@ class Flow:
         self.prot_dport = prot_dport
 
     def __hash__(self):
-        return hash((self.txport, self.rxport, self.ip_src, self.ip_dst, self.ip_prot,
-                    self.prot_sport, self.prot_dport))
-    
+        return hash(
+            (
+                self.txport,
+                self.rxport,
+                self.ip_src,
+                self.ip_dst,
+                self.ip_prot,
+                self.prot_sport,
+                self.prot_dport,
+            )
+        )
+
     def __eq__(self, other):
-        return (self.txport, self.rxport, self.ip_src, self.ip_dst, self.ip_prot,
-                    self.prot_sport, self.prot_dport) == (other.txport, other.rxport, other.ip_src, other.ip_dst, other.ip_prot,
-                                                            other.prot_sport, other.prot_dport)
+        return (
+            self.txport,
+            self.rxport,
+            self.ip_src,
+            self.ip_dst,
+            self.ip_prot,
+            self.prot_sport,
+            self.prot_dport,
+        ) == (
+            other.txport,
+            other.rxport,
+            other.ip_src,
+            other.ip_dst,
+            other.ip_prot,
+            other.prot_sport,
+            other.prot_dport,
+        )
+
 
 bind_layers(IPv6, CMA, nh=PROT_CMA)
 bind_layers(CMA, Ether)
 flowptr = 0
 flows = {}
 
-def analyze_packet(pkt: Packet, monitors: dict[int, dict[int, tuple[str, str]]], output_queue: queue.Queue):
+
+def analyze_packet(
+    pkt: Packet,
+    monitors: dict[int, dict[int, tuple[str, str]]],
+    output_queue: queue.Queue,
+):
     global flowptr
     global flows
     size = None
@@ -87,33 +119,33 @@ def analyze_packet(pkt: Packet, monitors: dict[int, dict[int, tuple[str, str]]],
 
     if CMA in pkt:
         print("Received packet")
-        base = pkt['CMA']
+        base = pkt["CMA"]
         monitor_id = base.mon_id
         monitor_iface_id = base.rx_port_id
-        uid = f'{base.uid_mon}-{base.uid_port}-{base.uid_time}'
+        uid = f"{base.uid_mon}-{base.uid_port}-{base.uid_time}"
         size = base.len - 16
         epoch = base.rx_time / 1e9
         time = datetime.fromtimestamp(epoch).strftime("%Y-%m-%d_%H:%M:%S.%f")
 
-        h_eth = base['Ether']
+        h_eth = base["Ether"]
         eth_type = hex(h_eth.type)
         h_ip = None
         if IP in base:
-            h_ip = base['IP']
+            h_ip = base["IP"]
             ip_src = IPv4Address(h_ip.src)
             ip_dst = IPv4Address(h_ip.dst)
             ip_prot = h_ip.proto
         elif IPv6 in base:
-            h_ip = base['IPv6']
+            h_ip = base["IPv6"]
             ip_src = IPv6Address(h_ip.src)
             ip_dst = IPv6Address(h_ip.dst)
             ip_prot = h_ip.nh
         if ip_prot == 6:
-            h_tcp = h_ip['TCP']
+            h_tcp = h_ip["TCP"]
             prot_sport = h_tcp.sport
             prot_dport = h_tcp.dport
         elif ip_prot == 17:
-            h_tcp = h_ip['UDP']
+            h_tcp = h_ip["UDP"]
             prot_sport = h_tcp.sport
             prot_dport = h_tcp.dport
 
@@ -127,7 +159,9 @@ def analyze_packet(pkt: Packet, monitors: dict[int, dict[int, tuple[str, str]]],
             rx_id = 1
         tx_port = monitors[monitor_id][tx_id]
         rx_port = monitors[monitor_id][rx_id]
-        thisflow = Flow(tx_port, rx_port, ip_src, ip_dst, ip_prot, prot_sport, prot_dport)
+        thisflow = Flow(
+            tx_port, rx_port, ip_src, ip_dst, ip_prot, prot_sport, prot_dport
+        )
         flowhash = hash(thisflow)
         fid = None
         if flowhash in flows:
@@ -138,16 +172,27 @@ def analyze_packet(pkt: Packet, monitors: dict[int, dict[int, tuple[str, str]]],
             flowptr += 1
             flows[flowhash] = fid
             # print(f'New flow {fid}')
-            #print(f'type:Artifact id:{fid} eth.type:{eth_type} ip.src:{ip_src} ip.dst:{ip_dst} ip.prot:{ip_prot} prot.sport:{prot_sport} prot.dport:{prot_dport}\n')
-            output_lines.append(f'type:Artifact id:{fid} eth.type:{eth_type} ip.src:{ip_src} ip.dst:{ip_dst} ip.prot:{ip_prot} prot.sport:{prot_sport} prot.dport:{prot_dport}\n')
+            # print(f'type:Artifact id:{fid} eth.type:{eth_type} ip.src:{ip_src} ip.dst:{ip_dst} ip.prot:{ip_prot} prot.sport:{prot_sport} prot.dport:{prot_dport}\n')
+            output_lines.append(
+                f"type:Artifact id:{fid} eth.type:{eth_type} ip.src:{ip_src} ip.dst:{ip_dst} ip.prot:{ip_prot} prot.sport:{prot_sport} prot.dport:{prot_dport}\n"
+            )
         # print('Writing spade edges')
-        print(f'type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
-        output_lines.append(f'type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
-        print(f'type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
-        output_lines.append(f'type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n')
+        print(
+            f"type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n"
+        )
+        output_lines.append(
+            f"type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n"
+        )
+        print(
+            f"type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n"
+        )
+        output_lines.append(
+            f"type:WasGeneratedBy from:{fid} to:{tx_port} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n"
+        )
 
     # ...rest of analysis...
     output_queue.put(output_lines)
+
 
 def packet_worker(pkt_queue: queue.Queue, monitors, output_queue: queue.Queue):
     while True:
@@ -158,8 +203,9 @@ def packet_worker(pkt_queue: queue.Queue, monitors, output_queue: queue.Queue):
         analyze_packet(pkt, monitors, output_queue)
         pkt_queue.task_done()
 
+
 def writer_worker(output_queue: queue.Queue):
-    with open("spade_pipe", 'w') as pipe:
+    with open("spade_pipe", "w") as pipe:
         while True:
             lines = output_queue.get()
             if lines is None:
@@ -169,6 +215,7 @@ def writer_worker(output_queue: queue.Queue):
                 pipe.write(line)
             pipe.flush()
             output_queue.task_done()
+
 
 if __name__ == "__main__":
 
@@ -183,31 +230,35 @@ if __name__ == "__main__":
     id = -1
     output_lines = []
     while idx < len(args):
-        iface_parts = args[idx].split('@', 1)
+        iface_parts = args[idx].split("@", 1)
         if len(iface_parts) == 1:
             id = args[idx]
             monitors[int(id)] = {}
         else:
             iface_id = iface_parts[0]
-            node = iface_parts[1].split('-', 1)[0]
-            print(f'type:Agent id:{node}\n')
-            output_lines.append(f'type:Agent id:{node}\n')
-            print(f'type:Process id:{iface_parts[1]}\n')
-            output_lines.append(f'type:Process id:{iface_parts[1]}\n')
-            print(f'type:WasControlledBy from:{iface_parts[1]} to:{node}\n')
-            output_lines.append(f'type:WasControlledBy from:{iface_parts[1]} to:{node}\n')
+            node = iface_parts[1].split("-", 1)[0]
+            print(f"type:Agent id:{node}\n")
+            output_lines.append(f"type:Agent id:{node}\n")
+            print(f"type:Process id:{iface_parts[1]}\n")
+            output_lines.append(f"type:Process id:{iface_parts[1]}\n")
+            print(f"type:WasControlledBy from:{iface_parts[1]} to:{node}\n")
+            output_lines.append(
+                f"type:WasControlledBy from:{iface_parts[1]} to:{node}\n"
+            )
             monitors[int(id)][int(iface_id)] = iface_parts[1]
         idx += 1
     output_queue.put(output_lines)
     print(monitors)
     print(ana_iface)
-    #sniff(prn=lambda x: analyze_packet(x, monitors), iface=ana_iface)
+    # sniff(prn=lambda x: analyze_packet(x, monitors), iface=ana_iface)
     workers = []
     writer = threading.Thread(target=writer_worker, args=(output_queue,))
     writer.daemon = True
     writer.start()
     for _ in range(num_workers - 1):
-        t = threading.Thread(target=packet_worker, args=(pkt_queue, monitors, output_queue))
+        t = threading.Thread(
+            target=packet_worker, args=(pkt_queue, monitors, output_queue)
+        )
         t.daemon = True
         t.start()
         workers.append(t)
