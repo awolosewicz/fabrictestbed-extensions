@@ -107,9 +107,9 @@ if TYPE_CHECKING:
 from fabrictestbed.slice_manager import SliceManager, SliceState, Status
 from fim.user import Node as FimNode
 
+from fabrictestbed_extensions.fablib.crinkle import CrinkleSlice
 from fabrictestbed_extensions.fablib.resources import FacilityPorts, Links, Resources
 from fabrictestbed_extensions.fablib.slice import Slice
-from fabrictestbed_extensions.fablib.crinkle import CrinkleSlice
 
 log = logging.getLogger("fablib")
 

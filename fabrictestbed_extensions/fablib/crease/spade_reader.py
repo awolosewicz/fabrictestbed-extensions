@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 import enum
 import getopt
-import sys
-from ipaddress import IPv4Address, IPv6Address
-from datetime import datetime
 import queue
+import sys
 import threading
 from concurrent import futures
+from datetime import datetime
+from ipaddress import IPv4Address, IPv6Address
 
 from scapy.all import sniff
-from scapy.layers.l2 import Ether
+from scapy.fields import IntField, LongField, ShortField, XShortField
 from scapy.layers.inet import IP
 from scapy.layers.inet6 import IPv6, IPv6ExtHdrDestOpt
+from scapy.layers.l2 import Ether
 from scapy.packet import Packet, Raw, bind_layers
-from scapy.fields import ShortField, LongField, XShortField, IntField
 
 PROT_CMA = 254
 CMA_ID = b"\x65\x87"

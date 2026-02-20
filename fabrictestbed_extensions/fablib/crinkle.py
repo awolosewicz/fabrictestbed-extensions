@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import enum
 import ipaddress
 import json
 import logging
-import enum
-import shutil
-import time
 import random
 import re
-from IPython.core.display_functions import display
+import shutil
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Union
+
+from IPython.core.display_functions import display
 
 if TYPE_CHECKING:
     from fabric_cf.orchestrator.swagger_client import (
@@ -21,14 +22,15 @@ if TYPE_CHECKING:
 
 from concurrent import futures
 from ipaddress import IPv6Address, ip_address
-from fabrictestbed.slice_editor import Node as FimNode
 
 from fabrictestbed.slice_editor import ExperimentTopology
+from fabrictestbed.slice_editor import Node as FimNode
+
 from fabrictestbed_extensions.fablib.interface import Interface
 from fabrictestbed_extensions.fablib.network_service import NetworkService
 from fabrictestbed_extensions.fablib.node import Node
+from fabrictestbed_extensions.fablib.site import Host, Site
 from fabrictestbed_extensions.fablib.slice import Slice
-from fabrictestbed_extensions.fablib.site import Site, Host
 
 CAPERSTART = "./caper/caper.byte -q -p -e"
 PCAPDIR = "/home/ubuntu/pcaps/"
