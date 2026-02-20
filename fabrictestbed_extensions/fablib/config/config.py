@@ -28,6 +28,7 @@ import os
 import re
 import time
 from functools import lru_cache
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, List, Union
 
@@ -79,6 +80,10 @@ class Config:
             Constants.ENV_VAR: Constants.FABRIC_AM_HOST,
             Constants.DEFAULT: Constants.DEFAULT_FABRIC_AM_HOST,
         },
+        Constants.CEPH_MGR_HOST: {
+            Constants.ENV_VAR: Constants.FABRIC_CEPH_MGR_HOST,
+            Constants.DEFAULT: Constants.DEFAULT_FABRIC_CEPH_MGR_HOST,
+        },
         Constants.TOKEN_LOCATION: {
             Constants.ENV_VAR: Constants.FABRIC_TOKEN_LOCATION,
             Constants.DEFAULT: Constants.DEFAULT_TOKEN_LOCATION,
@@ -122,6 +127,10 @@ class Config:
             Constants.ENV_VAR: Constants.FABRIC_LOG_FILE,
             Constants.DEFAULT: Constants.DEFAULT_LOG_FILE,
         },
+        Constants.LOG_PROPAGATE: {
+            Constants.ENV_VAR: Constants.FABRIC_LOG_PROPAGATE,
+            Constants.DEFAULT: Constants.DEFAULT_LOG_PROPAGATE,
+        },
         Constants.BASTION_SSH_CONFIG_FILE: {
             Constants.ENV_VAR: Constants.FABRIC_BASTION_SSH_CONFIG_FILE,
             Constants.DEFAULT: Constants.DEFAULT_FABRIC_BASTION_SSH_CONFIG_FILE,
@@ -137,6 +146,7 @@ class Config:
         Constants.ORCHESTRATOR_HOST: "Orchestrator",
         Constants.CORE_API_HOST: "Core API",
         Constants.AM_HOST: "Artifact Manager",
+        Constants.CEPH_MGR_HOST: "CEPH Manager",
         Constants.TOKEN_LOCATION: "Token File",
         Constants.PROJECT_ID: "Project ID",
         Constants.PROJECT_NAME: "Project Name",
@@ -149,6 +159,7 @@ class Config:
         Constants.SLICE_PRIVATE_KEY_PASSPHRASE: "Slice Private Key Passphrase",
         Constants.LOG_FILE: "Log File",
         Constants.LOG_LEVEL: "Log Level",
+        Constants.LOG_PROPAGATE: "Log Propagate",
         Constants.FABLIB_VERSION: "Version",
         Constants.AVOID: "Sites to avoid",
         Constants.DATA_DIR: "Data directory",
@@ -166,12 +177,14 @@ class Config:
         orchestrator_host: str = None,
         core_api_host: str = None,
         am_host: str = None,
+        ceph_mgr_host: str = None,
         token_location: str = None,
         project_id: str = None,
         bastion_username: str = None,
         bastion_key_location: str = None,
         log_level: str = Constants.DEFAULT_LOG_LEVEL,
         log_file: str = Constants.DEFAULT_LOG_FILE,
+        log_propagate: bool = Constants.DEFAULT_LOG_PROPAGATE,
         data_dir: str = Constants.DEFAULT_DATA_DIR,
         offline: bool = True,
         **kwargs,
@@ -209,6 +222,9 @@ class Config:
         if core_api_host is not None:
             self.set_core_api_host(core_api_host=core_api_host)
 
+        if ceph_mgr_host is not None:
+            self.set_ceph_mgr_host(ceph_mgr_host=ceph_mgr_host)
+
         if am_host is not None:
             self.set_am_host(am_host=am_host)
 
@@ -230,6 +246,9 @@ class Config:
         if log_file is not None:
             self.set_log_file(log_file=log_file)
 
+        if log_propagate is not None:
+            self.set_log_propagate(log_propagate=log_propagate)
+
         if data_dir is not None:
             self.set_data_dir(data_dir=data_dir)
 
@@ -246,6 +265,8 @@ class Config:
             raise ConfigException(
                 f"Token file does not exist, please provide the token at location: {token_location}!"
             )
+
+        self.log = logging.getLogger("fablib")
 
     def __load_configuration(self, file_path, **kwargs):
         """
@@ -356,7 +377,7 @@ class Config:
                     errors.append(f"{attr} is not set")
 
         if errors:
-            logging.error(f"Failing Config: {self.runtime_config}")
+            self.log.error(f"Failing Config: {self.runtime_config}")
             # TODO: define custom exception class to report errors,
             # and emit a more helpful error message with hints about
             # setting up environment variables or configuration file.
@@ -460,6 +481,23 @@ class Config:
         :type core_api_host: String
         """
         self.runtime_config[Constants.CORE_API_HOST] = core_api_host
+
+    def set_ceph_mgr_host(self, ceph_mgr_host: str):
+        """
+        Sets the ceph_mgr host value.
+        :param ceph_mgr_host: ceph_mgr host
+        :type ceph_mgr_host: String
+        """
+        self.runtime_config[Constants.CEPH_MGR_HOST] = ceph_mgr_host
+
+    def get_ceph_mgr_host(self) -> str:
+        """
+        Gets the ceph_mgr host value.
+
+        :return: the ceph_mgr host site
+        :rtype: String
+        """
+        return self.runtime_config.get(Constants.CEPH_MGR_HOST)
 
     def get_am_host(self) -> str:
         """
@@ -647,6 +685,29 @@ class Config:
         """
         self.runtime_config[Constants.LOG_FILE] = log_file
 
+    def get_log_propagate(self) -> bool:
+        """
+        Gets whether fablib logs propagate to the root logger.
+
+        :return: propagation flag
+        :rtype: bool
+        """
+        val = self.runtime_config.get(Constants.LOG_PROPAGATE)
+        if isinstance(val, str):
+            return val.strip().lower() in ("1", "true", "yes", "on", "y", "t")
+        if val is None:
+            return Constants.DEFAULT_LOG_PROPAGATE
+        return bool(val)
+
+    def set_log_propagate(self, log_propagate: Union[bool, str, int]):
+        """
+        Sets whether fablib logs propagate to the root logger.
+
+        :param log_propagate: propagation flag
+        :type log_propagate: bool
+        """
+        self.runtime_config[Constants.LOG_PROPAGATE] = log_propagate
+
     def get_data_dir(self) -> str:
         """
         Gets the data directory
@@ -812,29 +873,38 @@ class Config:
         Create log file if it doesn't exist; setup logger
         """
         try:
-            for handler in logging.root.handlers[:]:
-                logging.root.removeHandler(handler)
-        except Exception as e:
-            print(f"Exception from removeHandler: {e}")
-            pass
-
-        try:
             if self.get_log_file() and not os.path.isdir(
                 os.path.dirname(self.get_log_file())
             ):
                 os.makedirs(os.path.dirname(self.get_log_file()))
         except Exception:
-            logging.warning(
+            self.log.warning(
                 f"Failed to create log_file directory: {os.path.dirname(self.get_log_file())}"
             )
 
-        if self.get_log_file() and self.get_log_level():
-            logging.basicConfig(
-                filename=self.get_log_file(),
-                level=self.LOG_LEVELS[self.get_log_level()],
-                format="[%(asctime)s] {%(pathname)s:%(lineno)d} %(levelname)s - %(message)s",
-                datefmt="%H:%M:%S",
+        default_log_format = (
+            "[%(asctime)s] {%(pathname)s:%(lineno)d} %(levelname)s - %(message)s"
+        )
+        default_date_format = "%H:%M:%S"
+
+        # Control propagation to root handlers (default False to avoid Jupyter cell spam).
+        self.log.propagate = self.get_log_propagate()
+
+        if self.get_log_level():
+            self.log.setLevel(self.LOG_LEVELS[self.get_log_level()])
+
+        if self.get_log_file():
+            file_handler = RotatingFileHandler(
+                self.get_log_file(), backupCount=int(5), maxBytes=int(1024 * 1024 * 5)
             )
+            file_handler.setFormatter(
+                logging.Formatter(default_log_format, datefmt=default_date_format)
+            )
+            self.log.addHandler(file_handler)
+
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.CRITICAL)
+        self.log.addHandler(console_handler)
 
     @staticmethod
     def get_metadata_tag() -> str:

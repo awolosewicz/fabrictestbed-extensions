@@ -80,6 +80,8 @@ from fim.slivers.network_service import NSLayer
 from fabrictestbed_extensions.fablib.component import Component
 from fabrictestbed_extensions.fablib.interface import Interface
 
+log = logging.getLogger("fablib")
+
 
 class Node:
     """
@@ -235,7 +237,7 @@ class Node:
                 avoid=avoid,
             )
 
-        logging.info(f"Adding node: {name}, slice: {slice.get_name()}, site: {site}")
+        log.info(f"Adding node: {name}, slice: {slice.get_name()}, site: {site}")
         node = Node(
             slice,
             slice.topology.add_node(name=name, site=site),
@@ -604,7 +606,7 @@ class Node:
         """
 
         if str(self.get_reservation_state()) != "Active":
-            logging.debug(
+            log.debug(
                 f"Node {self.get_name()} is {self.get_reservation_state()}, Skipping get interfaces."
             )
             return
@@ -909,7 +911,9 @@ class Node:
         """
         if not self.cores:
             try:
-                self.cores = self.get_fim_node().get_property(pname="capacity_allocations").core
+                self.cores = (
+                    self.get_fim_node().get_property(pname="capacity_allocations").core
+                )
             except:
                 return None
         return self.cores
@@ -935,7 +939,9 @@ class Node:
         """
         if not self.ram:
             try:
-                self.ram = self.get_fim_node().get_property(pname="capacity_allocations").ram
+                self.ram = (
+                    self.get_fim_node().get_property(pname="capacity_allocations").ram
+                )
             except:
                 return None
         return self.ram
@@ -961,7 +967,9 @@ class Node:
         """
         if not self.disk:
             try:
-                self.disk = self.get_fim_node().get_property(pname="capacity_allocations").disk
+                self.disk = (
+                    self.get_fim_node().get_property(pname="capacity_allocations").disk
+                )
             except:
                 return None
         return self.disk
@@ -1285,7 +1293,7 @@ class Node:
             if not status:
                 component.delete()
                 component = None
-                logging.warning(error)
+                log.warning(error)
                 if self.raise_exception:
                     raise ValueError(error)
         if component:
@@ -1343,7 +1351,7 @@ class Node:
             return component
 
         except Exception as e:
-            logging.error(f"Error retrieving component '{name}': {e}", exc_info=True)
+            log.error(f"Error retrieving component '{name}': {e}", exc_info=True)
             raise Exception(f"Component not found: {name}")
 
     def get_ssh_command(self) -> str:
@@ -1357,12 +1365,14 @@ class Node:
         try:
             return self.render_template(
                 self.get_fablib_manager().get_ssh_command_line(),
-                skip=["ssh_command",
-                      "interfaces",
-                      "state",
-                      "error",
-                      "components",
-                      "networks"]
+                skip=[
+                    "ssh_command",
+                    "interfaces",
+                    "state",
+                    "error",
+                    "components",
+                    "networks",
+                ],
             )
         except:
             return self.get_fablib_manager().get_ssh_command_line()
@@ -1538,7 +1548,7 @@ class Node:
 
         :raises Exception: If SSH connection fails.
         """
-        logging.debug(
+        log.debug(
             f"Executing on node: {self.get_name()}, IP: {self.get_management_ip()}, Command: {command}"
         )
 
@@ -1683,14 +1693,14 @@ class Node:
 
                 if log_debug:
                     elapsed_time = time.time() - start_time
-                    logging.debug(
+                    log.debug(
                         f"Command executed in {elapsed_time:.2f}s, stdout: {rtn_stdout}, stderr: {rtn_stderr}"
                     )
 
                 return rtn_stdout, rtn_stderr
 
             except Exception as e:
-                logging.warning(f"Attempt {attempt + 1} failed: {e}")
+                log.warning(f"Attempt {attempt + 1} failed: {e}")
                 if attempt + 1 == retry:
                     raise
                 time.sleep(retry_interval)
@@ -1699,17 +1709,17 @@ class Node:
                 try:
                     client.close()
                 except Exception as e:
-                    logging.debug(f"Exception in client.close(): {e}")
+                    log.debug(f"Exception in client.close(): {e}")
 
                 try:
                     bastion_channel.close()
                 except Exception as e:
-                    logging.debug(f"Exception in bastion_channel.close(): {e}")
+                    log.debug(f"Exception in bastion_channel.close(): {e}")
 
                 try:
                     bastion.close()
                 except Exception as e:
-                    logging.debug(f"Exception in bastion.close(): {e}")
+                    log.debug(f"Exception in bastion.close(): {e}")
 
         raise Exception("ssh failed: Should not get here")
 
@@ -1826,9 +1836,7 @@ class Node:
 
         :raise Exception: if management IP is invalid
         """
-        logging.debug(
-            f"upload node: {self.get_name()}, local_file_path: {local_file_path}"
-        )
+        log.debug(f"upload node: {self.get_name()}, local_file_path: {local_file_path}")
 
         if self.get_fablib_manager().get_log_level() == logging.DEBUG:
             start = time.time()
@@ -1880,7 +1888,7 @@ class Node:
 
                 if self.get_fablib_manager().get_log_level() == logging.DEBUG:
                     end = time.time()
-                    logging.debug(
+                    log.debug(
                         f"Running node.upload_file(): file: {local_file_path}, "
                         f"elapsed time: {end - start} seconds"
                     )
@@ -1888,13 +1896,13 @@ class Node:
                 return file_attributes
 
             except Exception as e:
-                logging.warning(f"Exception on upload_file() attempt #{attempt}: {e}")
+                log.warning(f"Exception on upload_file() attempt #{attempt}: {e}")
 
                 if attempt + 1 == retry:
                     raise e
 
                 # Fail, try again
-                logging.warning(
+                log.warning(
                     f"SCP upload fail. Slice: {self.get_slice().get_name()}, Node: {self.get_name()}, trying again. Exception: {e}"
                 )
                 # traceback.print_exc()
@@ -1905,22 +1913,22 @@ class Node:
                 try:
                     ftp_client.close()
                 except Exception as e:
-                    logging.debug(f"Exception in ftp_client.close(): {e}")
+                    log.debug(f"Exception in ftp_client.close(): {e}")
 
                 try:
                     client.close()
                 except Exception as e:
-                    logging.debug(f"Exception in client.close(): {e}")
+                    log.debug(f"Exception in client.close(): {e}")
 
                 try:
                     bastion_channel.close()
                 except Exception as e:
-                    logging.debug("Exception in bastion_channel.close(): {e}")
+                    log.debug("Exception in bastion_channel.close(): {e}")
 
                 try:
                     bastion.close()
                 except Exception as e:
-                    logging.debug("Exception in bastion.close(): {e}")
+                    log.debug("Exception in bastion.close(): {e}")
 
         raise Exception("scp upload failed")
 
@@ -1991,7 +1999,7 @@ class Node:
         :param retry_interval: how often to retry SCP upon failure
         :type retry_interval: int
         """
-        logging.debug(
+        log.debug(
             f"download node: {self.get_name()}, remote_file_path: {remote_file_path}"
         )
 
@@ -2046,7 +2054,7 @@ class Node:
 
                 if self.get_fablib_manager().get_log_level() == logging.DEBUG:
                     end = time.time()
-                    logging.debug(
+                    log.debug(
                         f"Running node.download(): file: {remote_file_path}, "
                         f"elapsed time: {end - start} seconds"
                     )
@@ -2054,7 +2062,7 @@ class Node:
                 return file_attributes
 
             except Exception as e:
-                logging.warning(
+                log.warning(
                     f"Exception in download_file() (attempt #{attempt} of {retry}): {e}"
                 )
 
@@ -2062,7 +2070,7 @@ class Node:
                     raise e
 
                 # Fail, try again
-                logging.warning(
+                log.warning(
                     f"SCP download fail. Slice: {self.get_slice().get_name()}, Node: {self.get_name()}, trying again. Exception: {e}"
                 )
                 # traceback.print_exc()
@@ -2073,22 +2081,22 @@ class Node:
                 try:
                     ftp_client.close()
                 except Exception as e:
-                    logging.debug(f"Exception in ftp_client.close(): {e}")
+                    log.debug(f"Exception in ftp_client.close(): {e}")
 
                 try:
                     client.close()
                 except Exception as e:
-                    logging.debug(f"Exception in client.close(): {e}")
+                    log.debug(f"Exception in client.close(): {e}")
 
                 try:
                     bastion_channel.close()
                 except Exception as e:
-                    logging.debug(f"Exception in bastion_channel.close(): {e}")
+                    log.debug(f"Exception in bastion_channel.close(): {e}")
 
                 try:
                     bastion.close()
                 except Exception as e:
-                    logging.debug(f"Exception in bastion.close(): {e}")
+                    log.debug(f"Exception in bastion.close(): {e}")
 
         raise Exception("scp download failed")
 
@@ -2170,7 +2178,7 @@ class Node:
         import tarfile
         import tempfile
 
-        logging.debug(
+        log.debug(
             f"upload node: {self.get_name()}, local_directory_path: {local_directory_path}"
         )
 
@@ -2284,7 +2292,7 @@ class Node:
         import os
         import tarfile
 
-        logging.debug(
+        log.debug(
             f"upload node: {self.get_name()}, local_directory_path: {local_directory_path}"
         )
 
@@ -2311,11 +2319,11 @@ class Node:
         :return: true if SSH is working, false otherwise
         :rtype: bool
         """
-        logging.debug(f"test_ssh: node {self.get_name()}")
+        log.debug(f"test_ssh: node {self.get_name()}")
 
         try:
             if self.get_management_ip() is None:
-                logging.debug(
+                log.debug(
                     f"Node: {self.get_name()} failed test_ssh because management_ip == None"
                 )
 
@@ -2326,8 +2334,8 @@ class Node:
                 quiet=True,
             )
         except Exception as e:
-            # logging.debug(f"{e}")
-            logging.debug(e, exc_info=True)
+            # log.debug(f"{e}")
+            log.debug(e, exc_info=True)
             return False
         return True
 
@@ -2339,7 +2347,7 @@ class Node:
         :return: Name of the management interface or None if not found
         :rtype: Optional[str]
         """
-        logging.debug(f"{self.get_name()}->get_management_os_interface")
+        log.debug(f"{self.get_name()}->get_management_os_interface")
 
         # Check both IPv4 and IPv6 routes
         for ip_version in ["ip", "ip -6"]:
@@ -2347,7 +2355,7 @@ class Node:
             if interface:
                 return interface
 
-        logging.warning(
+        log.warning(
             f"{self.get_name()}->get_management_os_interface: No management interface found"
         )
         return None
@@ -2360,7 +2368,7 @@ class Node:
         :return: Name of the default interface or None if not found
         """
         command = f"sudo {ip_version} -j route list"
-        logging.debug(f"Executing: {command}")
+        log.debug(f"Executing: {command}")
 
         try:
             stdout, stderr = self.execute(command, quiet=True)
@@ -2368,15 +2376,24 @@ class Node:
 
             for route in stdout_json:
                 if route.get("dst") == "default":
-                    interface = route.get("dev")
-                    logging.debug(
-                        f"Found default route on {ip_version} with interface: {interface}"
-                    )
-                    return interface
+                    if "dev" in route.keys():
+                        interface = route.get("dev")
+                        log.debug(
+                            f"Found default route on {ip_version} with interface: {interface}"
+                        )
+                        return interface
+                    elif "nexthops" in route.keys():
+                        for nexthop in route.get("nexthops"):
+                            log.debug(f"nexthop : {nexthop.get('gateway')}")
+                            interface = nexthop.get("dev")
+                            return interface
+                    else:
+                        return None
+
         except (json.JSONDecodeError, KeyError) as e:
-            logging.error(f"Failed to parse route list for {ip_version}: {e}")
+            log.error(f"Failed to parse route list for {ip_version}: {e}")
         except Exception as e:
-            logging.error(f"Error executing command '{command}': {e}")
+            log.error(f"Error executing command '{command}': {e}")
 
         return None
 
@@ -2443,7 +2460,7 @@ class Node:
                     stdout, stderr = self.execute(f"sudo ip addr list", quiet=True)
                     return stdout
         except Exception as e:
-            logging.debug(f"Failed to get ip addr list: {e}")
+            log.debug(f"Failed to get ip addr list: {e}")
             raise e
 
     def ip_route_add(
@@ -2469,7 +2486,7 @@ class Node:
         try:
             self.execute(f"{ip_command} route add {subnet} via {gateway}", quiet=True)
         except Exception as e:
-            logging.warning(f"Failed to add route: {e}")
+            log.warning(f"Failed to add route: {e}")
             raise e
 
     def network_manager_stop(self):
@@ -2480,12 +2497,12 @@ class Node:
             stdout, stderr = self.execute(
                 f"sudo systemctl stop NetworkManager", quiet=True
             )
-            logging.info(
+            log.info(
                 f"Stopped NetworkManager with 'sudo systemctl stop "
                 f"NetworkManager': stdout: {stdout}\nstderr: {stderr}"
             )
         except Exception as e:
-            logging.warning(f"Failed to stop network manager: {e}")
+            log.warning(f"Failed to stop network manager: {e}")
             raise e
 
     def network_manager_start(self):
@@ -2496,11 +2513,11 @@ class Node:
             stdout, stderr = self.execute(
                 f"sudo systemctl restart NetworkManager", quiet=True
             )
-            logging.info(
+            log.info(
                 f"Started NetworkManager with 'sudo systemctl start NetworkManager': stdout: {stdout}\nstderr: {stderr}"
             )
         except Exception as e:
-            logging.warning(f"Failed to start network manager: {e}")
+            log.warning(f"Failed to start network manager: {e}")
             raise e
 
     def get_ip_routes(self):
@@ -2511,7 +2528,7 @@ class Node:
             stdout, stderr = self.execute("ip -j route list", quiet=True)
             return json.loads(stdout)
         except Exception as e:
-            logging.warning(f"Exception: {e}")
+            log.warning(f"Exception: {e}")
 
     # fablib.Node.get_ip_addrs()
     def get_ip_addrs(self):
@@ -2525,7 +2542,7 @@ class Node:
 
             return addrs
         except Exception as e:
-            logging.warning(f"Exception: {e}")
+            log.warning(f"Exception: {e}")
 
     def ip_route_del(
         self,
@@ -2550,7 +2567,7 @@ class Node:
         try:
             self.execute(f"{ip_command} route del {subnet} via {gateway}", quiet=True)
         except Exception as e:
-            logging.warning(f"Failed to del route: {e}")
+            log.warning(f"Failed to del route: {e}")
             raise e
 
     def ip_addr_add(
@@ -2583,7 +2600,7 @@ class Node:
                 quiet=True,
             )
         except Exception as e:
-            logging.warning(f"Failed to add addr: {e}")
+            log.warning(f"Failed to add addr: {e}")
             raise e
 
     def ip_addr_del(
@@ -2616,7 +2633,7 @@ class Node:
                 quiet=True,
             )
         except Exception as e:
-            logging.warning(f"Failed to del addr: {e}")
+            log.warning(f"Failed to del addr: {e}")
             raise e
 
     def un_manage_interface(self, interface: Interface):
@@ -2639,7 +2656,7 @@ class Node:
                 quiet=True,
             )
         except Exception as e:
-            logging.warning(f"Failed to mark interface as unmanaged: {e}")
+            log.warning(f"Failed to mark interface as unmanaged: {e}")
 
     def ip_link_up(self, subnet: Union[IPv4Network, IPv6Network], interface: Interface):
         """
@@ -2674,7 +2691,7 @@ class Node:
             else:
                 ip_command = "sudo ip"
         except Exception as e:
-            logging.warning(f"Failed to down link: {e}")
+            log.warning(f"Failed to down link: {e}")
             return
 
         try:
@@ -2683,7 +2700,7 @@ class Node:
                 quiet=True,
             )
         except Exception as e:
-            logging.warning(f"Failed to up link: {e}")
+            log.warning(f"Failed to up link: {e}")
             raise e
 
         try:
@@ -2692,7 +2709,7 @@ class Node:
                 quiet=True,
             )
         except Exception as e:
-            logging.warning(f"Failed to up link: {e}")
+            log.warning(f"Failed to up link: {e}")
             raise e
 
     def ip_link_down(
@@ -2724,7 +2741,7 @@ class Node:
             else:
                 ip_command = "sudo ip"
         except Exception as e:
-            # logging.warning(f"Failed to down link: {e}")
+            # log.warning(f"Failed to down link: {e}")
             return
 
         try:
@@ -2733,7 +2750,7 @@ class Node:
                 quiet=True,
             )
         except Exception as e:
-            logging.warning(f"Failed to down link: {e}")
+            log.warning(f"Failed to down link: {e}")
             raise e
 
     def set_ip_os_interface(
@@ -2776,7 +2793,7 @@ class Node:
             raise Exception(f"Invalid IP {ip}. IP must be vaild IPv4 or IPv6 string.")
 
         # Bring up base iface
-        logging.debug(
+        log.debug(
             f"{self.get_name()}->set_ip_os_interface: os_iface {os_iface}, vlan {vlan}, ip {ip}, cidr {cidr}, mtu {mtu}"
         )
         command = f"{ip_command} link set dev {os_iface} up"
@@ -2842,7 +2859,7 @@ class Node:
         try:
             [stdout_json] = json.loads(stdout)
         except Exception as e:
-            logging.warning(f"os_iface: {os_iface}, stdout: {stdout}, stderr: {stderr}")
+            log.warning(f"os_iface: {os_iface}, stdout: {stdout}, stderr: {stderr}")
             raise e
 
         link = stdout_json["link"]
@@ -2903,7 +2920,7 @@ class Node:
             else:
                 ip_command = "sudo ip"
         except Exception as e:
-            logging.warning(f"Failed to get network layer and/or type: {e}")
+            log.warning(f"Failed to get network layer and/or type: {e}")
             ip_command = "sudo ip"
 
         command = f"{ip_command} link add link {os_iface} name {os_iface}.{vlan} type vlan id {vlan}"
@@ -2928,7 +2945,7 @@ class Node:
         :type dst_ip: String
         """
         # TODO: Add docstring after doc networking classes
-        logging.debug(f"ping_test: node {self.get_name()}")
+        log.debug(f"ping_test: node {self.get_name()}")
 
         command = f"ping -c 1 {dst_ip}  2>&1 > /dev/null && echo Success"
         stdout, stderr = self.execute(command, quiet=True)
@@ -2952,7 +2969,7 @@ class Node:
         try:
             return Component(self, self.get_fim_node().components[name])
         except Exception as e:
-            logging.error(e, exc_info=True)
+            log.error(e, exc_info=True)
             raise Exception(f"Storage not found: {name}")
 
     def add_storage(self, name: str, auto_mount: bool = False) -> Component:
@@ -3191,17 +3208,17 @@ class Node:
         Post-boot tasks are list of commands associated with
         `post_boot_tasks` in fablib data.
         """
-        logging.debug(f"run_post_boot_tasks: {self.get_name()}")
+        log.debug(f"run_post_boot_tasks: {self.get_name()}")
         fablib_data = self.get_fablib_data()
         if "post_boot_tasks" in fablib_data:
             commands = fablib_data["post_boot_tasks"]
         else:
             commands = []
 
-        logging.debug(f"run_post_boot_tasks: commands: {commands}")
+        log.debug(f"run_post_boot_tasks: commands: {commands}")
 
         for command in commands:
-            logging.debug(f"run_post_boot_tasks: command: {command}")
+            log.debug(f"run_post_boot_tasks: command: {command}")
 
             if command[0] == "execute":
                 self.execute(
@@ -3210,19 +3227,19 @@ class Node:
                     output_file=f"{log_dir}/{self.get_name()}.log",
                 )
             elif command[0] == "upload_file":
-                logging.debug(f"run_post_boot_tasks: upload_file: {command}")
+                log.debug(f"run_post_boot_tasks: upload_file: {command}")
 
                 rtnval = self.upload_file(command[1], command[2])
-                logging.debug(f"run_post_boot_tasks: upload_file rtnval: {rtnval}")
+                log.debug(f"run_post_boot_tasks: upload_file rtnval: {rtnval}")
 
             elif command[0] == "upload_directory":
-                logging.debug(f"run_post_boot_tasks: upload_directory: {command}")
+                log.debug(f"run_post_boot_tasks: upload_directory: {command}")
 
                 rtnval = self.upload_directory(command[1], command[2])
-                logging.debug(f"run_post_boot_tasks: upload_directory rtnval: {rtnval}")
+                log.debug(f"run_post_boot_tasks: upload_directory rtnval: {rtnval}")
 
             else:
-                logging.error(f"Invalid post boot command: {command}")
+                log.error(f"Invalid post boot command: {command}")
 
     def run_post_update_commands(self, log_dir: str = "."):
         """
@@ -3248,18 +3265,18 @@ class Node:
         """
         fablib_data = self.get_fablib_data()
         if "instantiated" not in fablib_data:
-            logging.debug(
+            log.debug(
                 f"is_instantiated False, {self.get_name()}, fablib_data['instantiated']: does not exist"
             )
             return False
 
         if fablib_data["instantiated"] == "True":
-            logging.debug(
+            log.debug(
                 f"is_instantiated True, {self.get_name()}, fablib_data['instantiated']: {fablib_data['instantiated']}"
             )
             return True
         else:
-            logging.debug(
+            log.debug(
                 f"is_instantiated False, {self.get_name()}, fablib_data['instantiated']: {fablib_data['instantiated']}"
             )
             return False
@@ -3422,11 +3439,11 @@ class Node:
                 bdf=bdf,
             )
         )
-        logger = logging.getLogger()
+
         if status != Status.OK:
             raise Exception(f"Failed to issue POA - {operation} Error {poa_info}")
 
-        logger.info(
+        log.info(
             f"POA {poa_info[0].poa_id}/{operation} submitted for {self.get_reservation_id()}/{self.get_name()}"
         )
 
@@ -3446,7 +3463,7 @@ class Node:
                     f"Failed to get POA Status - {poa_info[0].poa_id}/{operation} Error {poa_info_status}"
                 )
             poa_state = poa_info_status[0].state
-            logger.info(
+            log.info(
                 f"Waiting for POA {poa_info[0].poa_id}/{operation} to complete! "
                 f"Checking POA Status (attempt #{attempt} of {retry}) current state: {poa_state}"
             )
@@ -3500,14 +3517,12 @@ class Node:
         {'CPU': '116', 'CPU Affinity': '0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127', 'CPU time': '0.7s', 'State': 'running', 'VCPU': '12'},
         {'CPU': '53', 'CPU Affinity': '0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127', 'CPU time': '2.1s', 'State': 'running', 'VCPU': '13'},
         {'CPU': '117', 'CPU Affinity': '0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127', 'CPU time': '1.3s', 'State': 'running', 'VCPU': '14'},
-        {'CPU': '49', 'CPU Affinity': '0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127', 'CPU time': '0.8s', 'State': 'running', 'VCPU': '15'}]        
+        {'CPU': '49', 'CPU Affinity': '0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127', 'CPU time': '0.8s', 'State': 'running', 'VCPU': '15'}]
         """
         # Get CPU Info for the VM and Host on which VM resides
         cpu_info = self.poa(operation="cpuinfo")
-        logging.getLogger().info(f"HOST CPU INFO: {cpu_info.get(self.get_host())}")
-        logging.getLogger().info(
-            f"Instance CPU INFO: {cpu_info.get(self.get_instance_name())}"
-        )
+        log.info(f"HOST CPU INFO: {cpu_info.get(self.get_host())}")
+        log.info(f"Instance CPU INFO: {cpu_info.get(self.get_instance_name())}")
         if cpu_info == "Failed":
             raise Exception("POA Failed to get CPU INFO")
         return cpu_info
@@ -3543,10 +3558,8 @@ class Node:
         """
         # Get Numa Info for the VM and Host on which VM resides
         numa_info = self.poa(operation="numainfo")
-        logging.getLogger().info(f"HOST Numa INFO: {numa_info.get(self.get_host())}")
-        logging.getLogger().info(
-            f"Instance Numa INFO: {numa_info.get(self.get_instance_name())}"
-        )
+        log.info(f"HOST Numa INFO: {numa_info.get(self.get_host())}")
+        log.info(f"Instance Numa INFO: {numa_info.get(self.get_instance_name())}")
         if numa_info == "Failed":
             raise Exception("POA Failed to get Numa INFO")
         return numa_info
@@ -3606,7 +3619,7 @@ class Node:
                     f"Available CPUs: {number_of_available_cpus}"
                 )
 
-                logging.getLogger().warning(msg)
+                log.warning(msg)
                 number_of_cpus_to_pin = number_of_available_cpus
                 if not number_of_cpus_to_pin:
                     raise Exception(msg)
@@ -3621,19 +3634,17 @@ class Node:
                 f"Pinning Node: {self.get_name()} CPUs for component: {component_name} to "
                 f"Numa Node: {numa_node}"
             )
-            logging.getLogger().info(f"{msg}  CPU Map: {vcpu_cpu_map}")
+            log.info(f"{msg}  CPU Map: {vcpu_cpu_map}")
             print(msg)
 
             # Issue POA
             status = self.poa(operation="cpupin", vcpu_cpu_map=vcpu_cpu_map)
             if status == "Failed":
                 raise Exception("POA Failed")
-            logging.getLogger().info(
-                f"CPU Pinning complete for node: {self.get_name()}"
-            )
+            log.info(f"CPU Pinning complete for node: {self.get_name()}")
         except Exception as e:
-            logging.getLogger().error(traceback.format_exc())
-            logging.getLogger(f"Failed to Pin CPU for node: {self.get_name()} e: {e}")
+            log.error(traceback.format_exc())
+            log.error(f"Failed to Pin CPU for node: {self.get_name()} e: {e}")
             raise e
 
     def rescan_pci(self, component_name: str = None):
@@ -3643,8 +3654,6 @@ class Node:
         :param component_name: Name of the component to rescan. If None, rescans all components.
         :raises RuntimeError: If no PCI devices are found or if the rescan operation fails.
         """
-        logger = logging.getLogger()
-
         try:
             # Retrieve list of PCI addresses to rescan
             components = (
@@ -3678,13 +3687,11 @@ class Node:
             if not status or status.lower() == "failed":
                 raise RuntimeError("PCI rescan operation (POA) failed.")
 
-            logger.info(
-                f"PCI rescan completed successfully for node: {self.get_name()}"
-            )
+            log.info(f"PCI rescan completed successfully for node: {self.get_name()}")
 
         except Exception as e:
-            logger.error(f"Failed PCI rescan for node {self.get_name()}: {e}")
-            logger.debug(traceback.format_exc())
+            log.error(f"Failed PCI rescan for node {self.get_name()}: {e}")
+            log.debug(traceback.format_exc())
             raise
 
     def os_reboot(self):
@@ -3696,7 +3703,7 @@ class Node:
         status = self.poa(operation="reboot")
         if status == "Failed":
             raise Exception("Failed to reboot the server")
-        logging.getLogger().info(f"Node: {self.get_name()} rebooted!")
+        log.info(f"Node: {self.get_name()} rebooted!")
 
     def numa_tune(self):
         """
@@ -3718,27 +3725,19 @@ class Node:
                 if numa_node in numa_nodes:
                     continue
 
-                logging.getLogger().info(
-                    f"Numa Node {numa_node} for component: {c.get_name()}"
-                )
+                log.info(f"Numa Node {numa_node} for component: {c.get_name()}")
 
                 # Free Memory for the Numa Node
                 numa_memory_free_str = (
                     numa_info.get(self.get_host()).get(f"node {numa_node}").get("free")
                 )
-                logging.getLogger().info(
-                    f"Numa Node {numa_node} free memory: {numa_memory_free_str}"
-                )
+                log.info(f"Numa Node {numa_node} free memory: {numa_memory_free_str}")
                 numa_memory_free = int(re.search(r"\d+", numa_memory_free_str).group())
-                logging.getLogger().info(
-                    f"Numa Node {numa_node} free memory: {numa_memory_free}"
-                )
+                log.info(f"Numa Node {numa_node} free memory: {numa_memory_free}")
 
                 # Memory allocated to VM on the Numa Node
-                logging.getLogger().info(
-                    f"VM memory: {numa_info.get(self.get_instance_name())}"
-                )
-                logging.getLogger().info(
+                log.info(f"VM memory: {numa_info.get(self.get_instance_name())}")
+                log.info(
                     f"VM memory: {numa_info.get(self.get_instance_name()).get(f'Node {numa_node}')}"
                 )
                 vm_mem = (
@@ -3746,13 +3745,11 @@ class Node:
                     .get(f"Node {numa_node}")
                     .get("Total")
                 )
-                logging.getLogger().info(f"VM memory: {vm_mem}")
+                log.info(f"VM memory: {vm_mem}")
 
                 # Exclude VM memory
                 available_memory_on_node = int(numa_memory_free) + int(vm_mem)
-                logging.getLogger().info(
-                    f"Available memory: {available_memory_on_node}"
-                )
+                log.info(f"Available memory: {available_memory_on_node}")
 
                 if available_memory_on_node <= 0:
                     continue
@@ -3773,22 +3770,18 @@ class Node:
             msg = (
                 f"Numa tune Node: {self.get_name()} Memory to Numa  Nodes: {numa_nodes}"
             )
-            logging.getLogger().info(msg)
+            log.info(msg)
             print(msg)
 
             # Issue POA
             status = self.poa(operation="numatune", node_set=numa_nodes)
             if status == "Failed":
-                logging.getLogger().error(
-                    f"Numa tune failed for node: {self.get_name()}"
-                )
+                log.error(f"Numa tune failed for node: {self.get_name()}")
             else:
-                logging.getLogger().info(
-                    f"Numa tune complete for node: {self.get_name()}"
-                )
+                log.info(f"Numa tune complete for node: {self.get_name()}")
         except Exception as e:
-            logging.getLogger().error(traceback.format_exc())
-            logging.getLogger(f"Failed to Numa tune for node: {self.get_name()} e: {e}")
+            log.error(traceback.format_exc())
+            logging.error(f"Failed to Numa tune for node: {self.get_name()} e: {e}")
             raise e
 
     def add_public_key(
@@ -3898,7 +3891,7 @@ class Node:
 
             if not found:
                 raise Exception(f"Sliver key: {sliver_key_name} not found!")
-            sliver_public_key = f'{found["ssh_key_type"]} {found["public_key"]}'
+            sliver_public_key = f"{found['ssh_key_type']} {found['public_key']}"
 
         operation = "addkey" if not remove else "removekey"
 
@@ -3907,9 +3900,7 @@ class Node:
         status = self.poa(operation=operation, keys=[key_dict])
         if status == "Failed":
             raise Exception(f"Failed to {operation} the node")
-        logging.getLogger().info(
-            f"{operation} to the node {self.get_name()} successful!"
-        )
+        log.info(f"{operation} to the node {self.get_name()} successful!")
         print(f"{operation} to the node {self.get_name()} successful!")
 
     def update(self, fim_node: FimNode):

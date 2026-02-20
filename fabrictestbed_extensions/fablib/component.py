@@ -61,10 +61,19 @@ from fabrictestbed.slice_editor import Component as FimComponent
 from fabrictestbed.slice_editor import ComponentModelType, Flags, Labels, UserData
 from tabulate import tabulate
 
+log = logging.getLogger("fablib")
+
 
 class Component:
-    """
-    A class for working with FABRIC components.
+    """Represents a hardware component attached to a FABRIC node.
+
+    Components (NICs, GPUs, FPGAs, NVMe, etc.) extend a node's capabilities and
+    are typically created via :meth:`Node.add_component()
+    <fabrictestbed_extensions.fablib.node.Node.add_component>` rather than direct
+    instantiation.
+
+    :cvar dict component_model_map: Mapping of component model names to FIM types.
+    :cvar dict component_configure_commands: Component-specific configuration commands.
     """
 
     component_model_map = {
@@ -165,6 +174,15 @@ class Component:
         return self.dict
 
     def generate_template_context(self):
+        """
+        Generate the base template context for this component.
+
+        Creates a dictionary context suitable for Jinja2 template rendering,
+        including component attributes and an empty interfaces list.
+
+        :return: Template context dictionary with component attributes
+        :rtype: dict
+        """
         context = self.toDict()
         context["interfaces"] = []
         # for interface in self.get_interfaces():
@@ -174,9 +192,30 @@ class Component:
         return context
 
     def get_template_context(self):
+        """
+        Get the Jinja2 template context for this component from the slice.
+
+        Retrieves the template rendering context from the slice, which includes
+        component variables and configuration that can be used in Jinja2 templates.
+
+        :return: Template context dictionary for Jinja2 rendering
+        :rtype: dict
+        """
         return self.get_slice().get_template_context(self)
 
     def render_template(self, input_string):
+        """
+        Render a Jinja2 template string using the component's context.
+
+        Processes the input template string with the component's template
+        context variables and returns the rendered result.
+
+        :param input_string: Jinja2 template string to render
+        :type input_string: str
+
+        :return: Rendered template output string
+        :rtype: str
+        """
         environment = jinja2.Environment()
         # environment.json_encoder = json.JSONEncoder(ensure_ascii=False)
         template = environment.from_string(input_string)
@@ -365,7 +404,6 @@ class Component:
             "numa": "",
         }
 
-
     def get_interfaces(
         self, include_subs: bool = True, refresh: bool = False, output: str = "list"
     ) -> Union[dict[str, Interface], list[Interface]]:
@@ -407,7 +445,7 @@ class Component:
         """
         Not recommended for most users.
 
-        GGets the FABRIC component this fablib component represents. This method
+        Gets the FABRIC component this fablib component represents. This method
         is used to access data at a lower level than FABlib.
 
         :return: the FABRIC component on this component
@@ -448,7 +486,9 @@ class Component:
         """
         # strip of the extra parts of the name added by fim
         if not self.dict["short_name"]:
-            self.dict["short_name"] = self.get_name()[len(f"{self.get_node().get_name()}-") :]
+            self.dict["short_name"] = self.get_name()[
+                len(f"{self.get_node().get_name()}-") :
+            ]
         return self.dict["short_name"]
 
     def get_name(self) -> str:
@@ -476,7 +516,11 @@ class Component:
         """
         if not self.dict["numa"]:
             try:
-                numa = self.get_fim_component().get_property(pname="label_allocations").numa
+                numa = (
+                    self.get_fim_component()
+                    .get_property(pname="label_allocations")
+                    .numa
+                )
                 if numa is not None:
                     if isinstance(numa, str):
                         return numa
@@ -496,7 +540,9 @@ class Component:
         :rtype: int
         """
         if not self.dict["disk"]:
-            self.dict["disk"] = self.get_fim_component().get_property(pname="capacity_allocations").disk
+            self.dict["disk"] = (
+                self.get_fim_component().get_property(pname="capacity_allocations").disk
+            )
         return self.dict["disk"]
 
     def get_unit(self) -> int:
@@ -507,7 +553,9 @@ class Component:
         :rtype: int
         """
         if not self.dict["units"]:
-            self.dict["units"] = self.get_fim_component().get_property(pname="capacity_allocations").unit
+            self.dict["units"] = (
+                self.get_fim_component().get_property(pname="capacity_allocations").unit
+            )
         return self.dict["units"]
 
     def get_pci_addr(self) -> str:
@@ -518,7 +566,9 @@ class Component:
         :rtype: String
         """
         if not self.dict["pci_address"]:
-            self.dict["pci_address"] = self.get_fim_component().get_property(pname="label_allocations").bdf
+            self.dict["pci_address"] = (
+                self.get_fim_component().get_property(pname="label_allocations").bdf
+            )
         return self.dict["pci_address"]
 
     def get_model(self) -> str:
@@ -529,17 +579,17 @@ class Component:
         :rtype: String
         """
         fim_model = str(self.get_fim_model()).replace("-", "_").replace(" ", "")
-        component_type = str(self.get_type())
+        component_type = self.get_type()
 
         prefix_map = {
-            str(ComponentType.SmartNIC): "NIC_",
-            str(ComponentType.NVME): "NVME_",
-            str(ComponentType.GPU): "GPU_",
-            str(ComponentType.FPGA): "FPGA_",
-            str(ComponentType.Storage): "Storage_",
+            ComponentType.SmartNIC: "NIC_",
+            ComponentType.NVME: "NVME_",
+            ComponentType.GPU: "GPU_",
+            ComponentType.FPGA: "FPGA_",
+            ComponentType.Storage: "Storage_",
         }
 
-        if component_type == str(ComponentType.SharedNIC):
+        if component_type == ComponentType.SharedNIC:
             return Constants.CMP_NIC_Basic
 
         prefix = prefix_map.get(component_type)
@@ -639,7 +689,7 @@ class Component:
                 if stderr != "":
                     output.append(stderr)
         except Exception:
-            logging.error(f"configure Fail: {self.get_name()}:", exc_info=True)
+            log.error(f"configure Fail: {self.get_name()}:", exc_info=True)
             raise Exception(str(output))
 
         print(f"\nTime to configure {time.time() - start:.0f} seconds")
@@ -705,7 +755,7 @@ class Component:
             )
             output.append(self.node.execute(f"df -h {mount_point}"))
         except Exception as e:
-            logging.error(f"config_nvme Fail: {self.get_name()}:", exc_info=True)
+            log.error(f"config_nvme Fail: {self.get_name()}:", exc_info=True)
             raise Exception(str(output))
 
         return output
@@ -715,7 +765,11 @@ class Component:
         Not for API use
         """
         if not self.dict["dev"]:
-            self.dict["dev"] = self.get_fim_component().get_property(pname="label_allocations").device_name
+            self.dict["dev"] = (
+                self.get_fim_component()
+                .get_property(pname="label_allocations")
+                .device_name
+            )
         return self.dict["dev"]
 
     @staticmethod
