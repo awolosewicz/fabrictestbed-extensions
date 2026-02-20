@@ -39,7 +39,7 @@
 
 #define MONPROT 0x6587
 #define CREASEPROT 254
-#define CREASEVER "Crease Monitor v0.6.0\n"
+#define CREASEVER "Crease Monitor v0.6.1\n"
 
 #define MAX_PORTS 3
 
@@ -451,12 +451,14 @@ crinkle_rx(
 	const uint16_t vport = devport_to_vport[port_id];
 	const uint16_t pidx = vport - 1;
 	const uint16_t outport = get_output_port_from_vport(vport);
-	uint64_t systime_ns;
+	uint64_t systime_ns, last_ns, tsc_start;
 	uint32_t n, nb_rx, nb_rem = 0, nb_warn;
 	uint16_t i;
 
 	clock_gettime(CLOCK_REALTIME, &ts);
 	systime_ns = timespec64_to_ns(&ts);
+	tsc_start = rte_rdtsc_precise();
+	last_ns = systime_ns;
 
 	for (i = 0; i < BURST_SIZE; ++i) {
 		default_metas[i].systime_ns = 0;
@@ -921,7 +923,7 @@ main(int argc, char *argv[])
 	unsigned k;
 	int i, nb_rx;
 	lcore_id = rx_lcores[0];
-	uint64_t last_packets_rx[MAX_PORTS], last_packets_tx[MAX_PORTS];
+	uint64_t last_packets_rx[nb_ports], last_packets_tx[nb_ports];
 
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
