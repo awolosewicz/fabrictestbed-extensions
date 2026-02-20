@@ -107,9 +107,9 @@ if TYPE_CHECKING:
 from fabrictestbed.slice_manager import SliceManager, SliceState, Status
 from fim.user import Node as FimNode
 
+from fabrictestbed_extensions.fablib.crinkle import CrinkleSlice
 from fabrictestbed_extensions.fablib.resources import FacilityPorts, Links, Resources
 from fabrictestbed_extensions.fablib.slice import Slice
-from fabrictestbed_extensions.fablib.crinkle import CrinkleSlice
 
 log = logging.getLogger("fablib")
 
@@ -2034,19 +2034,19 @@ Host * !bastion.fabric-testbed.net
         # fabric = fablib()
         new_slice = Slice.new_slice(self, name=name)
         return new_slice
-    
+
     def new_crinkle_slice(
-            self,
-            name: str,
-            pcaps_dir: str = ".query_analysis_pcaps",
-            name_prefix: str = "C"
-        ) -> CrinkleSlice:
+        self,
+        name: str,
+        pcaps_dir: str = ".query_analysis_pcaps",
+        name_prefix: str = "C",
+    ) -> CrinkleSlice:
         """
         Creates a new Crinkle slice with the given name and with an Analyzer node.
 
         :param name: the name to give the slice
         :type name: String
-        :param analyzer_name: Name for the 
+        :param analyzer_name: Name for the
         :type analyzer_name: String
         :param cores:
         :type cores: int
@@ -2062,7 +2062,9 @@ Host * !bastion.fabric-testbed.net
         :return: A new Crinkle slice
         :rtype: CrinkleSlice
         """
-        new_slice = CrinkleSlice.new_slice(self, name=name, pcaps_dir=pcaps_dir, name_prefix=name_prefix)
+        new_slice = CrinkleSlice.new_slice(
+            self, name=name, pcaps_dir=pcaps_dir, name_prefix=name_prefix
+        )
         return new_slice
 
     def get_site_advertisement(self, site: str) -> FimNode:
@@ -2441,7 +2443,7 @@ Host * !bastion.fabric-testbed.net
         user_only: bool = True,
         show_un_submitted: bool = False,
         pcaps_dir: str = ".query_analysis_pcaps",
-        name_prefix: str = "C"
+        name_prefix: str = "C",
     ) -> List[CrinkleSlice]:
         """
         Gets a list of Crinkle slices from the slice manager.
@@ -2497,13 +2499,17 @@ Host * !bastion.fabric-testbed.net
         if return_status == Status.OK:
             for slice in slices:
                 slice_object = CrinkleSlice.get_slice(
-                    self, sm_slice=slice, user_only=user_only, pcaps_dir=pcaps_dir, name_prefix=name_prefix
+                    self,
+                    sm_slice=slice,
+                    user_only=user_only,
+                    pcaps_dir=pcaps_dir,
+                    name_prefix=name_prefix,
                 )
                 return_slices.append(slice_object)
         else:
             raise Exception(f"Failed to get slices: {slices}")
         return return_slices
-        
+
     def get_crinkle_slice(
         self,
         name: str = None,
@@ -2511,7 +2517,7 @@ Host * !bastion.fabric-testbed.net
         user_only: bool = True,
         show_un_submitted: bool = False,
         pcaps_dir: str = ".query_analysis_pcaps",
-        name_prefix: str = "C"
+        name_prefix: str = "C",
     ) -> CrinkleSlice:
         """
         Gets a Crinkle slice by name or slice_id. Dead and Closing slices may have
@@ -2546,7 +2552,7 @@ Host * !bastion.fabric-testbed.net
                 user_only=user_only,
                 show_un_submitted=show_un_submitted,
                 pcaps_dir=pcaps_dir,
-                name_prefix=name_prefix
+                name_prefix=name_prefix,
             )
 
             if len(slices) == 1:
@@ -2561,7 +2567,7 @@ Host * !bastion.fabric-testbed.net
                 user_only=user_only,
                 show_un_submitted=show_un_submitted,
                 pcaps_dir=pcaps_dir,
-                name_prefix=name_prefix
+                name_prefix=name_prefix,
             )
 
             if len(slices) > 0:
@@ -2574,7 +2580,6 @@ Host * !bastion.fabric-testbed.net
             raise Exception(
                 "get_slice requires slice name (name) or slice id (slice_id)"
             )
-        
 
     def delete_slice(self, slice_name: str = None):
         """
