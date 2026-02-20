@@ -111,6 +111,8 @@ from fabrictestbed_extensions.fablib.resources import FacilityPorts, Links, Reso
 from fabrictestbed_extensions.fablib.slice import Slice
 from fabrictestbed_extensions.fablib.crinkle import CrinkleSlice
 
+log = logging.getLogger("fablib")
+
 
 class fablib:
     """
@@ -617,6 +619,8 @@ class FablibManager(Config):
 
     FABNETV4_SUBNET = IPv4Network("10.128.0.0/10")
     FABNETV6_SUBNET = IPv6Network("2602:FCFB:00::/40")
+    FABNETV4EXT_SUBNET = IPv4Network("23.134.232.0/22")
+    FABNETV6EXT_SUBNET = IPv6Network("2602:FCFB:00::/40")
 
     ssh_thread_pool_executor = None
 
@@ -634,6 +638,7 @@ class FablibManager(Config):
         bastion_key_location: str = None,
         log_level: str = Constants.DEFAULT_LOG_LEVEL,
         log_file: str = Constants.DEFAULT_LOG_FILE,
+        log_propagate: bool = Constants.DEFAULT_LOG_PROPAGATE,
         data_dir: str = Constants.DEFAULT_DATA_DIR,
         output: str = None,
         execute_thread_pool_size: int = 64,
@@ -682,6 +687,8 @@ class FablibManager(Config):
             Defaults to ``"DEBUG"``; other possible log levels are
             ``"INFO"``, ``"WARNING"``, ``"ERROR"``, and
             ``"CRITICAL"``, in reducing order of verbosity.
+        :param log_propagate: Whether fablib logs propagate to the root logger.
+            Defaults to ``False`` to avoid duplicate logging in notebooks.
         :param data_dir: directory for fablib to store temporary data.
         :param output: Format of fablib output; can be either
             ``"pandas"`` or ``"text"``.  Defaults to ``"pandas"`` in a
@@ -708,6 +715,7 @@ class FablibManager(Config):
             bastion_key_location=bastion_key_location,
             log_level=log_level,
             log_file=log_file,
+            log_propagate=log_propagate,
             data_dir=data_dir,
             offline=offline,
             **kwargs,
@@ -871,7 +879,7 @@ class FablibManager(Config):
             and self.get_default_slice_private_key_file()
             == self.get_bastion_key_location()
         ):
-            logging.error(
+            log.error(
                 "Sliver Key and Bastion key can not be same! Please use different key names!"
             )
             raise Exception(
@@ -884,15 +892,15 @@ class FablibManager(Config):
             self.get_default_slice_public_key() is None
             or self.get_default_slice_private_key() is None
         ):
-            logging.info("Sliver keys do not exist! Please create sliver keys")
+            log.info("Sliver keys do not exist! Please create sliver keys")
             self.create_sliver_keys()
 
         if self.get_bastion_username() is None:
-            logging.info("Bastion User name is not specified")
+            log.info("Bastion User name is not specified")
             raise Exception("Bastion User name is not specified")
 
         if self.get_project_id() is None:
-            logging.info("Project is not specified")
+            log.info("Project is not specified")
             raise Exception("Bastion User name is not specified")
 
         print("Configuration is valid")
@@ -904,7 +912,7 @@ class FablibManager(Config):
         """
         Get User information
 
-        :return returns a dictionary containing User's Information
+        :return: returns a dictionary containing User's Information
         :rtype: dict
         """
         return self.get_manager().get_user_info()
@@ -918,9 +926,9 @@ class FablibManager(Config):
         if self.get_bastion_username() is not None:
             return
 
-        logging.info("Fetching User's information")
+        log.info("Fetching User's information")
         user_info = self.get_user_info()
-        logging.debug("Updating Bastion User Name")
+        log.debug("Updating Bastion User Name")
         self.set_bastion_username(
             bastion_username=user_info.get(Constants.BASTION_LOGIN)
         )
@@ -948,7 +956,7 @@ class FablibManager(Config):
         bastion_key_file_name = os.path.basename(bastion_key_file)
 
         if os.path.exists(dir_path) and not overwrite:
-            logging.info(
+            log.info(
                 f"{dir_path} already exists and overwrite=False. Skipping creation."
             )
             return
@@ -958,7 +966,7 @@ class FablibManager(Config):
                 os.makedirs(dir_path)
             except OSError as e:
                 msg = f"Failed to create directory {dir_path}: {e}"
-                logging.error(msg)
+                log.error(msg)
                 raise Exception(msg)
 
         # Copy private key
@@ -1024,7 +1032,7 @@ Host * !bastion.fabric-testbed.net
 SSH tunnel config created and zipped at: {tgz_path}
 
 Download Instructions:
-Download your custom `fabric_ssh_tunnel_tools.tgz` file from the `fabric_config` folder. 
+Download your custom `fabric_ssh_tunnel_tools.tgz` file from the `fabric_config` folder.
 
 Usage Instructions:
 1. Unzip the archive and place the resulting `fabric_ssh_tunnel_tools/` folder somewhere accessible from your terminal.
@@ -1033,7 +1041,7 @@ Usage Instructions:
 4. In your terminal, run the SSH tunnel command generated by the next notebook cell.
     """
         print(msg)
-        logging.info(f"SSH tunnel config created at {tgz_path}")
+        log.info(f"SSH tunnel config created at {tgz_path}")
 
     def create_ssh_config(self, overwrite: bool = False):
         """
@@ -1060,14 +1068,14 @@ Usage Instructions:
                     f"can not create ssh_config file!"
                 )
                 print(msg)
-                logging.error(msg)
+                log.error(msg)
                 raise Exception(msg)
 
         with open(bastion_ssh_config_file, "w") as f:
             f.write(
                 f"""UserKnownHostsFile /dev/null
 StrictHostKeyChecking no
-ServerAliveInterval 120 
+ServerAliveInterval 120
 
 Host bastion.fabric-testbed.net
      User {self.get_bastion_username()}
@@ -1089,9 +1097,9 @@ Host * !bastion.fabric-testbed.net
         :type validate_only: bool
 
         """
-        logging.info("Fetching User's information")
+        log.info("Fetching User's information")
         user_info = self.get_user_info()
-        logging.debug("Updating Bastion User Name")
+        log.debug("Updating Bastion User Name")
         ssh_keys = user_info.get(Constants.SSH_KEYS)
 
         current_bastion_key = self.get_bastion_public_key()
@@ -1121,14 +1129,12 @@ Host * !bastion.fabric-testbed.net
             )
 
         if current_bastion_key is not None and found:
-            logging.info(
-                f"User: {user_info.get(Constants.EMAIL)} bastion key is valid!"
-            )
+            log.info(f"User: {user_info.get(Constants.EMAIL)} bastion key is valid!")
             print(f"User: {user_info.get(Constants.EMAIL)} bastion key is valid!")
             return
 
         msg = f"User: {user_info.get(Constants.EMAIL)} bastion keys do not exist or are expired."
-        logging.info(msg)
+        log.info(msg)
         print(msg)
         if not validate_only:
             self.create_bastion_keys(overwrite=True)
@@ -1158,20 +1164,20 @@ Host * !bastion.fabric-testbed.net
             bastion_key_location = self.get_bastion_key_location()
 
         if os.path.exists(bastion_key_location) and not overwrite:
-            logging.info(
+            log.info(
                 f"Bastion keys already exist at the location: {bastion_key_location}"
             )
             print(f"Bastion keys already exist at the location: {bastion_key_location}")
             return
 
-        logging.info("Bastion Key does not exist, creating a bastion key!")
+        log.info("Bastion Key does not exist, creating a bastion key!")
         self.__create_and_save_key(
             private_file_path=bastion_key_location,
             description="Bastion Key Fablib",
             key_type=Constants.KEY_TYPE_BASTION,
             store_pubkey=store_pubkey,
         )
-        logging.info(f"Bastion Key saved at location: {bastion_key_location}")
+        log.info(f"Bastion Key saved at location: {bastion_key_location}")
         print(f"Bastion Key saved at location: {bastion_key_location}")
 
     def create_sliver_keys(
@@ -1197,7 +1203,7 @@ Host * !bastion.fabric-testbed.net
             sliver_priv_key_location = self.get_default_slice_private_key_file()
 
         if os.path.exists(sliver_priv_key_location) and not overwrite:
-            logging.info(
+            log.info(
                 f"Sliver keys already exist at the location: {sliver_priv_key_location}"
             )
             print(
@@ -1205,14 +1211,14 @@ Host * !bastion.fabric-testbed.net
             )
             return
 
-        logging.info("Creating sliver key!")
+        log.info("Creating sliver key!")
         self.__create_and_save_key(
             private_file_path=sliver_priv_key_location,
             description="Sliver Key Fablib",
             store_pubkey=store_pubkey,
             key_type=Constants.KEY_TYPE_SLIVER,
         )
-        logging.info(f"Sliver Keys saved at location: {sliver_priv_key_location}")
+        log.info(f"Sliver Keys saved at location: {sliver_priv_key_location}")
         print(f"Sliver Keys saved at location: {sliver_priv_key_location}")
 
     def __create_and_save_key(
@@ -1250,7 +1256,7 @@ Host * !bastion.fabric-testbed.net
                     f"cannot create {key_type} keys!"
                 )
                 print(msg)
-                logging.error(msg)
+                log.error(msg)
                 raise Exception(msg)
 
         comment = os.path.basename(private_file_path)
@@ -1291,7 +1297,7 @@ Host * !bastion.fabric-testbed.net
         :rtype: FabricManager
         """
         try:
-            logging.info(
+            log.info(
                 f"orchestrator_host={self.get_orchestrator_host()},"
                 f"credmgr_host={self.get_credmgr_host()},"
                 f"core_api_host={self.get_core_api_host()},"
@@ -1317,7 +1323,7 @@ Host * !bastion.fabric-testbed.net
                 auto_refresh=self.auto_token_refresh,
             )
             self.manager.initialize()
-            logging.debug("Fabric manager initialized!")
+            log.debug("Fabric manager initialized!")
             # Update Project ID to be same as in Slice Manager
             self.set_project_id(project_id=self.manager.project_id)
             self.runtime_config[Constants.PROJECT_NAME] = (
@@ -1325,7 +1331,7 @@ Host * !bastion.fabric-testbed.net
             )
             self.determine_bastion_username()
         except Exception as e:
-            logging.error(e, exc_info=True)
+            log.error(e, exc_info=True)
             raise e
 
         return self.manager
@@ -1920,7 +1926,7 @@ Host * !bastion.fabric-testbed.net
         bastion_key_passphrase = self.get_bastion_key_passphrase()
 
         try:
-            logging.info(
+            log.info(
                 f"Probing bastion host {bastion_host} with "
                 f"username: {bastion_username}, key: {bastion_key_path}, "
                 f"key passphrase: {'hidden' if bastion_key_passphrase else None}"
@@ -1937,14 +1943,12 @@ Host * !bastion.fabric-testbed.net
 
             # Things should be fine if we are here.
             if result is None:
-                logging.info(f"Connection with {bastion_host} appears to be working")
+                log.info(f"Connection with {bastion_host} appears to be working")
                 return True
 
         except paramiko.SSHException as e:
             note = "Hint: check your bastion key. Is it valid? Is it expired?"
-            logging.error(
-                f"Error connecting to bastion host {bastion_host}: {e} ({note})"
-            )
+            log.error(f"Error connecting to bastion host {bastion_host}: {e} ({note})")
 
             # Since Python 3.11, we have BaseException.add_note(),
             # which is a nicer way of adding some extra information to
@@ -1961,7 +1965,7 @@ Host * !bastion.fabric-testbed.net
 
             raise e
         except Exception as e:
-            logging.error(f"Error connecting to bastion host {bastion_host}: {e}")
+            log.error(f"Error connecting to bastion host {bastion_host}: {e}")
             raise e
 
         finally:
@@ -2072,7 +2076,7 @@ Host * !bastion.fabric-testbed.net
         :return: fim object for this site
         :rtype: Node
         """
-        logging.info(f"Updating get_site_advertisement")
+        log.info(f"Updating get_site_advertisement")
         return_status, topology = self.get_manager().resources()
         if return_status != Status.OK:
             raise Exception(
@@ -2353,7 +2357,7 @@ Host * !bastion.fabric-testbed.net
 
         if self.get_log_level() == logging.DEBUG:
             end = time.time()
-            logging.debug(
+            log.debug(
                 f"Running self.get_slice_manager().slices(): elapsed time: {end - start} seconds"
             )
 
@@ -2813,7 +2817,7 @@ Host * !bastion.fabric-testbed.net
                 quiet=quiet,
             )
         else:
-            logging.error(f"Unknown output type: {output}")
+            log.error(f"Unknown output type: {output}")
 
     @staticmethod
     def list_table_text(
@@ -3009,7 +3013,7 @@ Host * !bastion.fabric-testbed.net
         if filter_function:
             data = list(filter(filter_function, data))
 
-        logging.debug(f"data: {data}\n\n")
+        log.debug(f"data: {data}\n\n")
 
         if output is None:
             output = self.output.lower()
@@ -3020,7 +3024,7 @@ Host * !bastion.fabric-testbed.net
         if fields is None:
             fields = []
 
-        logging.debug(f"fields: {fields}\n\n")
+        log.debug(f"fields: {fields}\n\n")
 
         headers = []
         for field in fields:
@@ -3029,7 +3033,7 @@ Host * !bastion.fabric-testbed.net
             else:
                 headers.append(field)
 
-        logging.debug(f"headers: {headers}\n\n")
+        log.debug(f"headers: {headers}\n\n")
 
         if output == "text":
             table = self.create_list_table(data, fields=fields)
@@ -3050,7 +3054,7 @@ Host * !bastion.fabric-testbed.net
                 quiet=quiet,
             )
         else:
-            logging.error(f"Unknown output type: {output}")
+            log.error(f"Unknown output type: {output}")
 
     @staticmethod
     def create_list_table(
@@ -3193,7 +3197,7 @@ Host * !bastion.fabric-testbed.net
             site = self.get_resources().get_site(site_name=node.get_site())
 
             if not site:
-                logging.warning(
+                log.warning(
                     f"Ignoring validation: Site: {node.get_site()} not available in resources."
                 )
                 return (
@@ -3204,18 +3208,18 @@ Host * !bastion.fabric-testbed.net
             site_state = site.get_state()
             if site_state != "Active":
                 msg = f"Node cannot be allocated on {node.get_site()}, {node.get_site()} is in {site_state}."
-                logging.error(msg)
+                log.error(msg)
                 return False, msg
             hosts = site.get_hosts()
             if not hosts:
                 msg = f"Node cannot be validated, host information not available for {site}."
-                logging.error(msg)
+                log.error(msg)
                 return False, msg
 
             if node.get_host():
                 if node.get_host() not in hosts:
                     msg = f"Invalid Request: Requested Host {node.get_host()} does not exist on site: {node.get_site()}."
-                    logging.error(msg)
+                    log.error(msg)
                     return False, msg
 
                 host = hosts.get(node.get_host())
@@ -3226,7 +3230,7 @@ Host * !bastion.fabric-testbed.net
                 )
 
                 if not status:
-                    logging.error(error)
+                    log.error(error)
                     return status, error
 
             for host in hosts.values():
@@ -3240,11 +3244,11 @@ Host * !bastion.fabric-testbed.net
             msg = f"Invalid Request: Requested Node cannot be accommodated by any of the hosts on site: {site.get_name()}."
             if error:
                 msg += f" Details: {error}"
-            logging.error(msg)
+            log.error(msg)
             return False, msg
         except Exception as e:
-            logging.error(e)
-            logging.error(traceback.format_exc())
+            log.error(e)
+            log.error(traceback.format_exc())
             return False, str(e)
 
     def create_artifact(
@@ -3312,7 +3316,7 @@ Host * !bastion.fabric-testbed.net
 
         if self.get_log_level() == logging.DEBUG:
             end = time.time()
-            logging.debug(
+            log.debug(
                 f"Running self.get_manager().list_artifacts(): elapsed time: {end - start} seconds"
             )
 

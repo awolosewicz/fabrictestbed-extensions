@@ -22,11 +22,52 @@
 # SOFTWARE.
 #
 # Author: Komal Thareja (kthare10@renci.org)
+"""Configuration constants and default values for FABlib.
+
+This module defines all constants used throughout the FABlib library including:
+- Default hostnames for FABRIC services (Orchestrator, CredMgr, etc.)
+- Environment variable names for configuration
+- Default file paths for keys, tokens, and configuration
+- Hardware component names and types
+- UI color schemes
+- Image names and their metadata
+- Configuration keys for runtime settings
+"""
+
 import logging
 import os
 
 
 class Constants:
+    """Central repository for all FABlib configuration constants and defaults.
+
+    This class contains all constant values used across FABlib, organized into
+    several categories:
+
+    Configuration Defaults:
+        - DEFAULT_FABRIC_* - Default hostnames and URLs for FABRIC services
+        - DEFAULT_LOG_* - Logging configuration defaults
+        - DEFAULT_*_FILE - Default file paths for keys and configuration
+
+    Environment Variables:
+        - FABRIC_* - Environment variable names for runtime configuration
+
+    Configuration Keys:
+        - Lower-case keys used in configuration files (fabric_rc)
+
+    Hardware Constants:
+        - Component names for NICs, GPUs, FPGAs, and storage devices
+        - Both user-facing and internal component identifiers
+
+    UI Constants:
+        - Color schemes for the FABRIC brand and status indicators
+
+    Image Metadata:
+        - IMAGE_NAMES - Dictionary mapping image names to descriptions and default users
+
+    All constants are class attributes and should be accessed as Constants.CONSTANT_NAME.
+    """
+
     DEFAULT_FABRIC_CREDMGR_HOST = "cm.fabric-testbed.net"
     DEFAULT_FABRIC_ORCHESTRATOR_HOST = "orchestrator.fabric-testbed.net"
     DEFAULT_FABRIC_CORE_API_HOST = "uis.fabric-testbed.net"
@@ -35,6 +76,7 @@ class Constants:
     DEFAULT_FABRIC_BASTION_HOST = "bastion.fabric-testbed.net"
     DEFAULT_LOG_LEVEL = "INFO"
     DEFAULT_LOG_FILE = "/tmp/fablib/fablib.log"
+    DEFAULT_LOG_PROPAGATE = False
     DEFAULT_DATA_DIR = "/tmp/fablib"
     DEFAULT_WORK_DIR = f"{os.environ['HOME']}/work"
     DEFAULT_FABRIC_CONFIG_DIR = f"{DEFAULT_WORK_DIR}/fabric_config"
@@ -67,6 +109,7 @@ class Constants:
     FABRIC_SLICE_PRIVATE_KEY_PASSPHRASE = "FABRIC_SLICE_PRIVATE_KEY_PASSPHRASE"
     FABRIC_LOG_FILE = "FABRIC_LOG_FILE"
     FABRIC_LOG_LEVEL = "FABRIC_LOG_LEVEL"
+    FABRIC_LOG_PROPAGATE = "FABRIC_LOG_PROPAGATE"
     FABRIC_AVOID = "FABRIC_AVOID"
     FABRIC_SSH_COMMAND_LINE = "FABRIC_SSH_COMMAND_LINE"
     FABLIB_VERSION = "fablib_version"
@@ -124,6 +167,7 @@ class Constants:
     BASTION_KEY_PASSPHRASE = "bastion_key_passphrase"
     LOG_FILE = "log_file"
     LOG_LEVEL = "log_level"
+    LOG_PROPAGATE = "log_propagate"
     DATA_DIR = "data_dir"
     SSH_COMMAND_LINE = "ssh_command_line"
     AVOID = "avoid"

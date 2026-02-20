@@ -1,10 +1,39 @@
-# Change Log 
+# Change Log
 
 This is the changelog file for FABRIC testbed extensions.  All notable
 changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## 1.9.7
+
+### Changed
+- Fix for when reporting management interface from OS for IPv6 on rocky nodes (Issue [#471] PR [#470](https://github.com/fabric-testbed/fabrictestbed-extensions/pull/470)
+- Missed tab spaces from PR#470. This is resolved using PR [#472]
+- Improve the performance of several get_ calls through caching (Issue [#453](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/453))
+- Enable Fabric token creation via CLI (Issue [#473](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/473))
+
+
+## 1.9.6
+
+### Changed
+- Replace remaining instances of the use of root logger with logging.getLogger("fablib").
+- Updated dependency for `cryptography` and `Utils::is_reachable` to work for IPv4/IPv6. (PR [#469](https://github.com/fabric-testbed/fabrictestbed-extensions/pull/469))
+
+## 1.9.5
+
+### Added
+- Add the Fabnet external networks subnet as constants to the FablibManager.
+
+### Changed
+- Change `setup_logging` to not use the root logger as it alters the logging of the the application consuming the FABRIC API. Use logging.getLogger("fablib") instead.
+
+### Fixed
+- Fix typos in docstrings that prevent proper parsing. Some docstrings were missing `:` or new lines. 
+- Fix type annotations where `str or node.Node` was used instead of `Union[str, node.Node]` or `str | node.Node`.
+- Fix a typo in the docstring of the `get_fim_component` method.
+- Prevent setup_logging from removing all pre-existing logging handlers [#458](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/458)
 
 ## 1.9.4 
 - Fix TLS verify and documentation for Ceph utils (Issue [#451](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/451))
@@ -63,9 +92,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Ensure slice key and bastion key names are not identical (Issue [#389](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/389))
 
-## [1.7.4] - 11/05/2024 
+## [1.7.4] - 11/05/2024
 
-### Added 
+### Added
 - Missing docstrings in network_service module (Issue [#313](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/314))
 - Artifact Manager Support (Issue [#358](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/358))
 - FabNet user specified subnets (Issue [#361](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/361))
@@ -248,7 +277,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for CPU Pinning and Numa tuning (Issue [#221](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/221))
 
 ### Removed
-  
+
 - Remove unused `AbcFabLIB` class (Issue
   [#117](https://github.com/fabric-testbed/fabrictestbed-extensions/issues/117))
 
@@ -268,7 +297,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The interface.get_ip_addr() fuction now returns address strings for devs that were manually configured. 
+- The interface.get_ip_addr() fuction now returns address strings for devs that were manually configured.
 
 ## [1.4.2] - 2023-04-21
 
