@@ -730,6 +730,78 @@ class CrinkleSlice(Slice):
             logging.info(e, exc_info=True)
             raise Exception(f"Node not found: {name}")
 
+    def _populate_l2bridge_monitor(
+        self,
+        monitor: CrinkleMonitor,
+        name: str,
+        interfaces: List[Interface],
+        subnet: ipaddress = None,
+        gateway: ipaddress = None,
+        user_data: dict = {},
+        sinks: List[Interface] = [],
+    ) -> List[NetworkService]:
+        """
+        Not intended for API call.
+
+        Shared L2Bridge-building body used by add_monitored_l2network() and
+        add_monitored_l3network(): adds a monitor NIC and an add_l2network
+        sub-network for each interface, honoring sinks, and records the
+        creation data on the monitor.
+
+        :param monitor: the CrinkleMonitor node the sub-networks will attach to
+        :type monitor: CrinkleMonitor
+
+        :param name: the name of the monitored network
+        :type name: String
+
+        :param interfaces: the interfaces to build the L2Bridge sub-networks with
+        :type interfaces: List[Interface]
+
+        :param subnet:
+        :type subnet: ipaddress
+
+        :param gateway:
+        :type gateway: ipaddress
+
+        :param user_data
+        :type user_data: dict
+
+        :param sinks: A set of interfaces which should have any Crinkle packet trailers
+            stripped before entering.
+        :type sinks: List[Interface]
+
+        :return: the sub-networks created for each interface, in the same order as `interfaces`
+        :rtype: List[NetworkService]
+        """
+        sub_nets: List[NetworkService] = []
+        for iface in interfaces:
+            iface_node_name = iface.get_node().get_name()
+            monitor_iface = monitor.add_component(
+                "NIC_Basic", f"{self.prefix}_nic_{iface_node_name}"
+            ).get_interfaces()[0]
+            monitor_iface.set_mode("manual")
+            new_net = self.add_l2network(
+                f"{self.prefix}_net_{name}_{iface_node_name}",
+                [iface, monitor_iface],
+                "L2Bridge",
+                subnet,
+                gateway,
+                user_data,
+            )
+            self.set_orig_net_name(new_net, name)
+            monitor.data.net_type = "L2Bridge"
+            monitor.creation_data.append(
+                (
+                    iface_node_name,
+                    iface.get_name(),
+                    f"{self.prefix}_nic_{iface_node_name}",
+                    (iface in sinks),
+                    0,
+                )
+            )
+            sub_nets.append(new_net)
+        return sub_nets
+
     def add_monitored_l2network(
         self,
         name: str = None,
@@ -831,33 +903,107 @@ class CrinkleSlice(Slice):
         )
 
         if type == "L2Bridge":
-            for iface in interfaces:
-                iface_node_name = iface.get_node().get_name()
-                monitor_iface = monitor.add_component(
-                    "NIC_Basic", f"{self.prefix}_nic_{iface_node_name}"
-                ).get_interfaces()[0]
-                monitor_iface.set_mode("manual")
-                new_net = self.add_l2network(
-                    f"{self.prefix}_net_{name}_{iface_node_name}",
-                    [iface, monitor_iface],
-                    "L2Bridge",
-                    subnet,
-                    gateway,
-                    user_data,
-                )
-                self.set_orig_net_name(new_net, name)
-                monitor.data.net_type = type
-                monitor.creation_data.append(
-                    (
-                        iface_node_name,
-                        iface.get_name(),
-                        f"{self.prefix}_nic_{iface_node_name}",
-                        (iface in sinks),
-                        0,
-                    )
-                )
+            self._populate_l2bridge_monitor(
+                monitor, name, interfaces, subnet, gateway, user_data, sinks
+            )
             self.monitors[name] = monitor
         monitor.set_monitor_data()
+        return monitor
+
+    def add_monitored_l3network(
+        self,
+        name: str = None,
+        interfaces: List[Interface] = [],
+        fabnet_iface: Interface = None,
+        vni: int = None,
+        role: str = "src",
+        fabnet_type: str = "IPv4",
+        subnet: ipaddress = None,
+        gateway: ipaddress = None,
+        user_data: dict = {},
+        sinks: List[Interface] = [],
+        host: str = None,
+        site: str = None,
+        cores: int = CrinkleMonitor.default_cores,
+        ram: int = CrinkleMonitor.default_ram,
+        disk: int = CrinkleMonitor.default_disk,
+    ) -> CrinkleMonitor:
+        """
+        Adds the local, single-site segment of an L3 (FABNet) monitored network
+        that lets a monitored link cross between two FABRIC slices/sites over
+        FABNet L3. This builds an ordinary single-site monitored L2Bridge between
+        the two given `interfaces`, using the same machinery as
+        add_monitored_l2network(), and additionally records tunnel metadata
+        (VNI, FABNet uplink interface, role, and FABNet type) on the resulting
+        sub-network so it can be discovered later with get_monitored_l3networks().
+
+        The DPDK monitor itself is unaware of the cross-site tunnel; the tunnel
+        (e.g. a VXLAN encap/decap over the FABNet uplink) is expected to be set
+        up out-of-band using the recorded metadata.
+
+        :param name: the name of the network service
+        :type name: String
+
+        :param interfaces: exactly two interfaces to build the local L2Bridge
+            with: the local endpoint interface and the tunnel-local interface
+        :type interfaces: List[Interface]
+
+        :param fabnet_iface: the tunnel node's FABNet uplink interface
+        :type fabnet_iface: Interface
+
+        :param vni: the VXLAN VNI used for the cross-site tunnel
+        :type vni: int
+
+        :param role: the role of this segment in the tunnel, "src" (encap side)
+            or "dst" (decap side)
+        :type role: String
+
+        :param fabnet_type: the FABNet type used for the tunnel, "IPv4" or "IPv6"
+        :type fabnet_type: String
+
+        :param subnet:
+        :type subnet: ipaddress
+
+        :param gateway:
+        :type gateway: ipaddress
+
+        :param user_data
+        :type user_data: dict
+
+        :param sinks: A set of interfaces which should have any Crinkle packet trailers
+            stripped before entering.
+        :type sinks: List[Interface]
+
+        :return: a new CrinkleMonitor
+        :rtype: CrinkleMonitor
+        """
+        if not site:
+            site = interfaces[0].get_site()
+
+        monitor = self.add_monitor(
+            name=f"{self.prefix}_monitor_{name}",
+            site=site,
+            net_name=name,
+            host=host,
+            cores=cores,
+            ram=ram,
+            disk=disk,
+        )
+
+        sub_nets = self._populate_l2bridge_monitor(
+            monitor, name, interfaces, subnet, gateway, user_data, sinks
+        )
+        self.monitors[name] = monitor
+        monitor.set_monitor_data()
+
+        self.set_l3_link_data(
+            sub_nets[0],
+            vni=vni,
+            fabnet_iface_name=fabnet_iface.get_name() if fabnet_iface else None,
+            role=role,
+            fabnet_type=fabnet_type,
+        )
+
         return monitor
 
     @staticmethod
@@ -879,6 +1025,93 @@ class CrinkleSlice(Slice):
         user_data = net.get_user_data()
         user_data["crinkle_net_name"] = name
         net.set_user_data(user_data=user_data)
+
+    @staticmethod
+    def get_l3_link_data(net: NetworkService) -> Optional[dict]:
+        """
+        Not intended for API call. See: CrinkleSlice.get_monitored_l3networks()
+
+        Gets the Crinkle L3 (FABNet) tunnel metadata stored on a network by
+        set_l3_link_data(), if any.
+
+        :param net: the network to read L3 link metadata from
+        :type net: NetworkService
+        :return: a dict with keys "vni", "fabnet_iface_name", "role", and
+            "fabnet_type", or None if the network has no L3 link metadata
+        :rtype: Optional[dict]
+        """
+        user_data = net.get_user_data()
+        if "crinkle_l3_link" in user_data:
+            l3_link_data = user_data["crinkle_l3_link"]
+            logging.info(
+                f"Retrieved L3 link data for {net.get_name()} as {l3_link_data}"
+            )
+            return l3_link_data
+        else:
+            logging.info(f"Did not retrieve L3 link data for {net.get_name()}")
+            return None
+
+    @staticmethod
+    def set_l3_link_data(
+        net: NetworkService,
+        vni: int,
+        fabnet_iface_name: str,
+        role: str,
+        fabnet_type: str,
+    ):
+        """
+        Not intended for API call. See: CrinkleSlice.add_monitored_l3network()
+
+        Stores Crinkle L3 (FABNet) tunnel metadata on a network's user data.
+
+        :param net: the network to store L3 link metadata on
+        :type net: NetworkService
+        :param vni: the VXLAN VNI used for the cross-site tunnel
+        :type vni: int
+        :param fabnet_iface_name: the name of the tunnel node's FABNet uplink interface
+        :type fabnet_iface_name: String
+        :param role: the role of this segment in the tunnel, "src" or "dst"
+        :type role: String
+        :param fabnet_type: the FABNet type used for the tunnel, "IPv4" or "IPv6"
+        :type fabnet_type: String
+        """
+        logging.info(f"Storing L3 link data for network {net.get_name()}")
+        user_data = net.get_user_data()
+        user_data["crinkle_l3_link"] = {
+            "vni": vni,
+            "fabnet_iface_name": fabnet_iface_name,
+            "role": role,
+            "fabnet_type": fabnet_type,
+        }
+        net.set_user_data(user_data=user_data)
+
+    def get_monitored_l3networks(self) -> List[dict]:
+        """
+        Scans this slice's networks for Crinkle L3 (FABNet) monitored-network
+        links (i.e. those created with add_monitored_l3network()) and returns
+        their metadata. Intended for use after slice submission.
+
+        :return: a list of dicts, one per monitored L3 link, each with keys
+            "net_name" (the original Crinkle network name), "network" (the
+            NetworkService), "vni", "fabnet_iface_name", "role", and
+            "fabnet_type"
+        :rtype: List[dict]
+        """
+        l3networks: List[dict] = []
+        for net in self.get_networks():
+            l3_link_data = self.get_l3_link_data(net)
+            if l3_link_data is not None:
+                l3networks.append(
+                    {
+                        "net_name": self.get_orig_net_name(net),
+                        "network": net,
+                        "vni": l3_link_data["vni"],
+                        "fabnet_iface_name": l3_link_data["fabnet_iface_name"],
+                        "role": l3_link_data["role"],
+                        "fabnet_type": l3_link_data["fabnet_type"],
+                    }
+                )
+        return l3networks
 
     def allocate_hosts(self):
         allocated = {}

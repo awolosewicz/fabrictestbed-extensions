@@ -6,6 +6,12 @@ changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+- Add Crinkle L3 (FABNet) monitored-network support (`add_monitored_l3network`), so a monitored link can cross two independent slices/sites over FABNet L3 — reuses the same monitored-L2Bridge machinery as `add_monitored_l2network()` locally (the DPDK monitor is unchanged) and records VXLAN tunnel metadata (`vni`, `fabnet_iface_name`, `role`, `fabnet_type`) via new `get/set_l3_link_data()` helpers.
+- Add `CrinkleSlice.get_monitored_l3networks()` to enumerate all L3-monitored links in a slice after submission, for post-submit VXLAN tunnel bring-up.
+
 ## 2.0.7
 
 ### Fixed
