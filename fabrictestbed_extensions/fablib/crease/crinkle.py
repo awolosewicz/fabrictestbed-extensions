@@ -1475,10 +1475,14 @@ class CrinkleSlice(Slice):
                     f"Post boot config {node.get_name()}, Failed! ({time.time() - start:.0f} sec) {e}"
                 )
 
-        # Push updates to user_data
-        print("Saving fablib data... ", end="")
-        self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
-        self.update()
+        # user_data accumulated by the node.config() threads is persisted by the
+        # save-submit after monitor setup below (inside the do_post_boot block).
+        # Do NOT call self.update() here: it replaces the in-memory topology from
+        # the orchestrator and would discard un-submitted user_data.
+        if not self.do_post_boot:
+            print("Saving fablib data... ", end="")
+            self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
+            self.update()
 
         for node in self.get_nodes():
             if "attestable_switch_config" in node.get_user_data():
