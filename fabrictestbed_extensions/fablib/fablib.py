@@ -140,6 +140,7 @@ class FablibManager(Config):
         validate_config: bool = True,
         no_ssh: bool = False,
         raise_on_not_found: bool = False,
+        ssh_connect_limit: int = None,
         **kwargs,
     ):
         """
@@ -210,6 +211,11 @@ class FablibManager(Config):
             methods raise ``ResourceNotFoundError`` if the resource is not found;
             when ``False`` (default), they return ``None``.  Individual calls
             can override this via their ``raise_exception`` parameter.
+        :param ssh_connect_limit: Maximum number of concurrent bastion SSH
+            handshakes. Limits how many nodes establish a new bastion
+            connection at once, avoiding handshake storms under high thread
+            counts. Defaults to the ``FABRIC_SSH_CONNECT_LIMIT`` environment
+            variable, or 8 if unset.
         """
         # If id_token is provided, disable auto_token_refresh
         if id_token is not None:
@@ -255,6 +261,12 @@ class FablibManager(Config):
                 )
         self.required_check()
         self.lock = threading.Lock()
+        resolved_ssh_connect_limit = ssh_connect_limit or int(
+            os.environ.get(
+                Constants.FABRIC_SSH_CONNECT_LIMIT, Constants.DEFAULT_SSH_CONNECT_LIMIT
+            )
+        )
+        self.ssh_connect_semaphore = threading.Semaphore(resolved_ssh_connect_limit)
         # These dictionaries are maintained to keep cache of the slice objects created
         # Use the same objects when user queries for slices
         # This was added to address the concerns for
@@ -892,6 +904,13 @@ Host * !bastion.fabric-testbed.net
         Get :py:class:`ThreadPoolExecutor` that runs SSH commands.
         """
         return self.ssh_thread_pool_executor
+
+    def get_ssh_connect_semaphore(self) -> threading.Semaphore:
+        """
+        Get the :py:class:`threading.Semaphore` that throttles concurrent
+        bastion SSH handshakes to ``ssh_connect_limit`` at a time.
+        """
+        return self.ssh_connect_semaphore
 
     def __build_manager(self) -> FabricManagerV2:
         """
