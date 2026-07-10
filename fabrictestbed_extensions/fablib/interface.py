@@ -1201,23 +1201,32 @@ class Interface(TemplateMixin):
         physical_iface = self.get_physical_os_interface_name()
         is_vlan = vlan is not None and device_name != physical_iface
 
+        # Build (without executing) the full sequence of nmcli steps, then
+        # issue them as a single chained SSH command so configuring an
+        # interface costs one round trip instead of six to eight.
+        cmds = []
+
         # Create or modify the connection with the IP address
         if is_vlan:
-            node._nmcli_ensure_connection(
-                conn_name=conn_name,
-                ifname=device_name,
-                ip_version=ip_version,
-                addresses=cidr,
-                conn_type="vlan",
-                vlan_id=str(vlan),
-                vlan_parent=physical_iface,
+            cmds.append(
+                node._nmcli_ensure_connection_cmd(
+                    conn_name=conn_name,
+                    ifname=device_name,
+                    ip_version=ip_version,
+                    addresses=cidr,
+                    conn_type="vlan",
+                    vlan_id=str(vlan),
+                    vlan_parent=physical_iface,
+                )
             )
         else:
-            node._nmcli_ensure_connection(
-                conn_name=conn_name,
-                ifname=device_name,
-                ip_version=ip_version,
-                addresses=cidr,
+            cmds.append(
+                node._nmcli_ensure_connection_cmd(
+                    conn_name=conn_name,
+                    ifname=device_name,
+                    ip_version=ip_version,
+                    addresses=cidr,
+                )
             )
 
         network_type = network.get_type()
@@ -1230,50 +1239,50 @@ class Interface(TemplateMixin):
                 iface_subnet = str(
                     ipaddress.ip_network(f"{addr}/{subnet_net.prefixlen}", strict=False)
                 )
-                node._nmcli_configure_pbr(
-                    conn_name=conn_name,
-                    ip_version=ip_version,
-                    addr=addr,
-                    prefix=str(subnet_net.prefixlen),
-                    gateway=str(gateway),
-                    subnet=iface_subnet,
+                cmds.append(
+                    node._nmcli_pbr_cmds(
+                        conn_name=conn_name,
+                        ip_version=ip_version,
+                        addr=addr,
+                        prefix=str(subnet_net.prefixlen),
+                        gateway=str(gateway),
+                        subnet=iface_subnet,
+                    )
                 )
         elif network_type in [ServiceType.FABNetv4, ServiceType.FABNetv6]:
             # Internal L3 networks: never-default + fabric route
             if gateway:
-                node._nmcli_configure_fabnet_routes(
-                    conn_name=conn_name,
-                    ip_version=ip_version,
-                    gateway=str(gateway),
-                    network_type=network_type,
+                cmds.append(
+                    node._nmcli_fabnet_route_cmds(
+                        conn_name=conn_name,
+                        ip_version=ip_version,
+                        gateway=str(gateway),
+                        network_type=network_type,
+                    )
                 )
         else:
             # L2 networks: IP only, no gateway or routes
-            node.execute(
-                f"sudo nmcli c mod {conn_name} {ip_version}.never-default yes",
-                quiet=True,
-            )
+            cmds.append(f"sudo nmcli c mod {conn_name} {ip_version}.never-default yes")
 
         # Disable the unused IP version on data-plane interfaces to prevent
         # SLAAC/DHCP from running (e.g. IPv6 auto-config on an IPv4-only link).
         other_version = "ipv6" if ip_version == "ipv4" else "ipv4"
-        node.execute(
-            f"sudo nmcli c mod {conn_name} {other_version}.method disabled",
-            quiet=True,
-        )
+        cmds.append(f"sudo nmcli c mod {conn_name} {other_version}.method disabled")
 
         # Bring the connection up
-        node._nmcli_up(conn_name)
+        cmds.append(
+            f"sudo nmcli c up {conn_name} 2>/dev/null || sudo nmcli c up {conn_name}"
+        )
 
         # Configure rp_filter for asymmetric routing tolerance
-        node.execute(
-            f"sudo sysctl -w net.{ip_version}.conf.all.rp_filter=2 > /dev/null 2>&1 || true",
-            quiet=True,
+        cmds.append(
+            f"sudo sysctl -w net.{ip_version}.conf.all.rp_filter=2 > /dev/null 2>&1 || true"
         )
-        node.execute(
-            f"sudo sysctl -w net.{ip_version}.conf.{self.get_physical_os_interface_name()}.rp_filter=2 > /dev/null 2>&1 || true",
-            quiet=True,
+        cmds.append(
+            f"sudo sysctl -w net.{ip_version}.conf.{self.get_physical_os_interface_name()}.rp_filter=2 > /dev/null 2>&1 || true"
         )
+
+        node.execute(" ; ".join(cmds), quiet=True)
 
     def add_mirror(self, port_name: str, name: str = "mirror", vlan: str = None):
         """

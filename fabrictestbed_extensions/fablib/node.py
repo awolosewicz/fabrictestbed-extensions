@@ -2888,6 +2888,154 @@ class Node(TemplateMixin):
             quiet=True,
         )
 
+    # ---- nmcli string-builder helpers (single-round-trip variants) ----
+    #
+    # These build shell command strings without executing anything, so
+    # callers can join several steps and issue them as one chained
+    # `node.execute(" ; ".join(cmds))` instead of one SSH round trip per
+    # step. They are additive: the execute-style helpers above are kept
+    # for existing call sites.
+
+    def _nmcli_ensure_connection_cmd(
+        self,
+        conn_name: str,
+        ifname: str,
+        ip_version: str,
+        addresses: str,
+        conn_type: str = "ethernet",
+        vlan_id: Optional[str] = None,
+        vlan_parent: Optional[str] = None,
+        mtu: Optional[str] = None,
+    ) -> str:
+        """
+        Build the add-or-modify nmcli command pair for a connection as a
+        single shell string, without executing it. ``nmcli c add`` exits
+        non-zero when a connection with the given con-name already exists,
+        so chaining ``|| nmcli c mod`` replaces the separate existence-check
+        round trip that :meth:`_nmcli_ensure_connection` performs.
+
+        :param conn_name: NM connection name (e.g. 'fabric-enp7s0')
+        :param ifname: OS interface name
+        :param ip_version: 'ipv4' or 'ipv6'
+        :param addresses: CIDR address (e.g. '10.0.0.1/24')
+        :param conn_type: 'ethernet' or 'vlan'
+        :param vlan_id: VLAN ID when conn_type is 'vlan'
+        :param vlan_parent: parent device when conn_type is 'vlan'
+        :param mtu: optional MTU value
+        :return: shell command string
+        """
+        add_cmd = (
+            f"sudo nmcli c add type {conn_type} ifname {ifname} con-name {conn_name}"
+        )
+        if conn_type == "vlan" and vlan_id and vlan_parent:
+            add_cmd += f" dev {vlan_parent} id {vlan_id}"
+        add_cmd += (
+            f" {ip_version}.method manual"
+            f" {ip_version}.addresses {addresses}"
+            f" connection.autoconnect yes"
+        )
+        if mtu:
+            add_cmd += f" 802-3-ethernet.mtu {mtu}"
+
+        mod_cmd = (
+            f"sudo nmcli c mod {conn_name}"
+            f" {ip_version}.method manual"
+            f" {ip_version}.addresses {addresses}"
+            f" connection.autoconnect yes"
+        )
+        if mtu:
+            mod_cmd += f" 802-3-ethernet.mtu {mtu}"
+
+        return f"{add_cmd} 2>/dev/null || {mod_cmd}"
+
+    def _nmcli_pbr_cmds(
+        self,
+        conn_name: str,
+        ip_version: str,
+        addr: str,
+        prefix: str,
+        gateway: str,
+        subnet: str,
+        pbr_table: int = 100,
+        pbr_priority: int = 1000,
+        route_metric: int = 200,
+    ) -> str:
+        """
+        Build the Policy-Based Routing setup for an nmcli connection
+        (used for FabNetv4Ext/FabNetv6Ext networks) as a single shell
+        conditional, without executing it. Mirrors the branch logic of
+        :meth:`_nmcli_configure_pbr` exactly, but performs the
+        management-default-route probe and the resulting `nmcli c mod`
+        calls in one round trip instead of two.
+
+        :param conn_name: NM connection name
+        :param ip_version: 'ipv4' or 'ipv6'
+        :param addr: IP address (without prefix)
+        :param prefix: prefix length
+        :param gateway: next-hop gateway IP
+        :param subnet: interface subnet in CIDR notation
+        :param pbr_table: routing table number
+        :param pbr_priority: routing rule priority
+        :param route_metric: route metric
+        :return: shell command string
+        """
+        ip_vaddr = "::" if ip_version == "ipv6" else "0.0.0.0"
+        default_route = "::/0" if ip_version == "ipv6" else "0.0.0.0/0"
+        ip_flag = "6" if ip_version == "ipv6" else "4"
+
+        with_default = " ; ".join(
+            [
+                f"sudo nmcli c mod {conn_name} {ip_version}.never-default yes",
+                f"sudo nmcli c mod {conn_name} {ip_version}.route-table {pbr_table}",
+                f'sudo nmcli c mod {conn_name} +{ip_version}.routes "{subnet} {ip_vaddr}"',
+                f'sudo nmcli c mod {conn_name} +{ip_version}.routes "{default_route} {gateway}"',
+                f'sudo nmcli c mod {conn_name} +{ip_version}.routing-rules "priority {pbr_priority} from {addr}/{prefix} table {pbr_table}"',
+                f"sudo nmcli c mod {conn_name} {ip_version}.route-metric {route_metric}",
+            ]
+        )
+        no_default = " ; ".join(
+            [
+                f"sudo nmcli c mod {conn_name} {ip_version}.never-default no",
+                f'sudo nmcli c mod {conn_name} +{ip_version}.routes "{default_route} {gateway}"',
+            ]
+        )
+
+        return (
+            f'if [ -n "$(ip -{ip_flag} route show default 2>/dev/null | '
+            f"awk '{{print $3; exit}}')\" ]; then {with_default} ; "
+            f"else {no_default} ; fi"
+        )
+
+    def _nmcli_fabnet_route_cmds(
+        self,
+        conn_name: str,
+        ip_version: str,
+        gateway: str,
+        network_type,
+    ) -> str:
+        """
+        Build the route setup for FabNetv4/FabNetv6 networks (non-Ext) as a
+        single shell string, without executing it. Adds never-default and a
+        route to the FABRIC supernet.
+
+        :param conn_name: NM connection name
+        :param ip_version: 'ipv4' or 'ipv6'
+        :param gateway: next-hop gateway IP
+        :param network_type: the ServiceType
+        :return: shell command string
+        """
+        if network_type == ServiceType.FABNetv4:
+            fabric_route = "10.128.0.0/10"
+        else:
+            fabric_route = "2602:FCFB:00::/40"
+
+        return " ; ".join(
+            [
+                f"sudo nmcli c mod {conn_name} {ip_version}.never-default yes",
+                f'sudo nmcli c mod {conn_name} +{ip_version}.routes "{fabric_route} {gateway}"',
+            ]
+        )
+
     # ---- netplan helpers ----
 
     def _netplan_write_config(
