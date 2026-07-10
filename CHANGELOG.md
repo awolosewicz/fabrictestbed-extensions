@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `CrinkleSlice.get_monitored_l3networks()` to enumerate all L3-monitored links in a slice after submission, for post-submit VXLAN tunnel bring-up.
 - Add transparent zlib+base64 compression of per-element `user_data` above 256 bytes (backward-compatible read; disable with `FABRIC_COMPRESS_USER_DATA=0`)
 - Add `FABRIC_SSH_CONNECT_LIMIT` env var / `FablibManager(ssh_connect_limit=...)` to cap concurrent bastion SSH handshakes
+- Add `CrinkleSlice.save_fablib_data()` with a local dump fallback (`dump_user_data_locally()` / `restore_user_data()`) so post-boot setup completes when the orchestrator rejects the fablib data save (e.g. HTTP 413); `get_slice()` reapplies the dump on reload
 - Add per-command duration logging in `Node.execute()`
 
 ### Changed
