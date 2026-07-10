@@ -1549,11 +1549,36 @@ class CrinkleSlice(Slice):
             jobs: List[futures.Future] = []
             counter = 0
             self.monitor_string = f"{self.analyzer_iface.get_device_name()} {self.analyzer.get_cores() - 1}"
+
+            # Refresh monitor references up front (in-memory) so their
+            # dataplane interface lists can be prefetched in parallel below,
+            # instead of each iteration blocking on its own SSH round trip.
+            refreshed_monitors = {
+                key: self.get_monitor(monitor.get_name())
+                for key, monitor in self.monitors.items()
+            }
+            iface_prefetch_pool = futures.ThreadPoolExecutor(8)
+            iface_prefetch_jobs = {
+                iface_prefetch_pool.submit(mon.get_dataplane_os_interfaces): key
+                for key, mon in refreshed_monitors.items()
+            }
+            prefetched_dataplane_ifaces: Dict[str, Optional[List[dict]]] = {}
+            for job in futures.as_completed(iface_prefetch_jobs):
+                key = iface_prefetch_jobs[job]
+                try:
+                    prefetched_dataplane_ifaces[key] = job.result()
+                except Exception as e:
+                    logging.error(
+                        f"Monitor for net {key} failed to prefetch dataplane interfaces"
+                    )
+                    logging.error(e, exc_info=True)
+                    prefetched_dataplane_ifaces[key] = None
+
             for key, monitor in self.monitors.items():
                 logging.info(
                     f"Refreshing monitor for net {key} after slice creation, count {counter}"
                 )
-                refreshed_monitor = self.get_monitor(monitor.get_name())
+                refreshed_monitor = refreshed_monitors[key]
                 mon_site = refreshed_monitor.get_site()
                 jobs.append(
                     refreshed_monitor.execute_thread(
@@ -1580,7 +1605,10 @@ class CrinkleSlice(Slice):
                 # Need a way to know where a specific interface falls *in the OS ordering of them*
                 # Such as, if an interface is device enp8s0, and OS has enp7s0, enp8s0, enp9s0, return 1
                 # And because this isn't consistent per site, cannot assume enp7s0 is first
-                for entry in refreshed_monitor.get_dataplane_os_interfaces():
+                dataplane_ifaces = prefetched_dataplane_ifaces.get(key)
+                if dataplane_ifaces is None:
+                    dataplane_ifaces = refreshed_monitor.get_dataplane_os_interfaces()
+                for entry in dataplane_ifaces:
                     ordered_devs[entry["ifname"]] = ctr
                     ctr += 1
                 refreshed_monitor.data.cmd_args += (
