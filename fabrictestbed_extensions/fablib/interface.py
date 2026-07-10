@@ -847,7 +847,7 @@ class Interface(TemplateMixin):
                 f"Interface does not known network. Finding network for interface {self.get_name()}"
             )
 
-            for net in self.get_slice().get_networks():
+            for net in self.get_slice().get_networks(refresh=False):
                 if net.has_interface(self):
                     self.network = net
                     log.debug(

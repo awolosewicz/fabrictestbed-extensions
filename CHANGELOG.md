@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `Interface._config_nmcli` now issues a single chained SSH command per interface instead of 6-8 round trips
 - Crinkle `post_boot_config` now batches per-node unmanage commands, parallelizes attestable-switch config and monitor interface discovery, and defers the mid-run fablib data save to the post-monitor submit
+- `Interface.get_network()` reuses the slice network cache and Crinkle `post_boot_config` resolves every interface's network in one pass (`resolve_interface_networks()`), removing quadratic client-side FIM scans that dominated post-boot wall time on large slices
 
 ### Fixed
 - Fix `CrinkleMonitor.MonitorData` shared mutable default `iface_mappings` causing cross-monitor mapping accumulation

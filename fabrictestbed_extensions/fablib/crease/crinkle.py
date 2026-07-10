@@ -1479,6 +1479,27 @@ class CrinkleSlice(Slice):
             print(f"{ctr}/{len(jobs)} jobs finished")
         self.do_ptp_setup = False
 
+    def resolve_interface_networks(self):
+        """
+        Cache the owning network on every interface in one pass.
+
+        Interface.get_network() otherwise scans every network service per
+        interface, which is quadratic in slice size and dominates
+        post_boot_config wall time on large slices.
+        """
+        fim_iface_nets = []
+        for net in self.get_networks(refresh=False):
+            for fim_interface in net.get_fim().interface_list:
+                fim_iface_nets.append((fim_interface.name, net))
+        for iface in self.get_all_interfaces():
+            if iface.network is not None:
+                continue
+            name = iface.get_name()
+            for fim_name, net in fim_iface_nets:
+                if fim_name.endswith(name):
+                    iface.network = net
+                    break
+
     def post_boot_config(self):
         """
         Runs post_boot_config identically to Slice.post_boot_config before running
@@ -1507,9 +1528,12 @@ class CrinkleSlice(Slice):
         self.update()
 
         logging.info(f"post_boot_config: get_networks")
-        for network in self.get_networks():
+        for network in self.get_networks(refresh=False):
             logging.info(f"post_boot_config: network {network.get_name()}")
             network.config()
+
+        logging.info(f"post_boot_config: resolve interface networks")
+        self.resolve_interface_networks()
 
         logging.info(f"post_boot_config: get_interfaces")
         for interface in self.get_all_interfaces():
