@@ -1512,13 +1512,29 @@ class CrinkleSlice(Slice):
             self.submit(wait=True, progress=False, post_boot_config=False, wait_ssh=False)
             self.update()
 
+        aswitches = {}
         for node in self.get_nodes():
             if "attestable_switch_config" in node.get_user_data():
                 logging.info(
                     f"switch config: {str(node.get_user_data()['attestable_switch_config'])}"
                 )
-                aswitch = self.get_attestable_switch(name=node.get_name())
-                aswitch.switch_config()
+                aswitches[node.get_name()] = self.get_attestable_switch(
+                    name=node.get_name()
+                )
+
+        switch_pool = futures.ThreadPoolExecutor(8)
+        switch_jobs = {
+            switch_pool.submit(aswitch.switch_config): name
+            for name, aswitch in aswitches.items()
+        }
+        for job in futures.as_completed(switch_jobs):
+            name = switch_jobs[job]
+            try:
+                job.result()
+                logging.info(f"Attestable switch config for {name}, Done!")
+            except Exception as e:
+                logging.error(f"Attestable switch config for {name}, Failed! {e}")
+                logging.error(e, exc_info=True)
 
         # Custom Crinkle logic
         logging.info(f"Crinkle post_boot_config")
