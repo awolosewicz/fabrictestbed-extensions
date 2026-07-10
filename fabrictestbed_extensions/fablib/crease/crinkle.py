@@ -1426,18 +1426,46 @@ class CrinkleSlice(Slice):
                 logging.error(e, exc_info=True)
 
         logging.info(f"post_boot_config: unmanage interfaces")
+        node_interfaces: Dict[str, Tuple[Node, List[Interface]]] = {}
         for interface in self.get_all_interfaces():
             try:
-                logging.info(f"post_boot_config: unmanage {interface.get_name()}")
-                interface.get_node().execute(
-                    f"sudo nmcli device set {interface.get_device_name()} managed no",
-                    quiet=True,
-                    timeout=30,
+                node = interface.get_node()
+                node_interfaces.setdefault(node.get_name(), (node, []))[1].append(
+                    interface
                 )
             except Exception as e:
                 logging.error(
-                    f"Interface: {interface.get_name()} failed to become unmanaged"
+                    f"Interface: {interface.get_name()} failed to resolve node"
                 )
+                logging.error(e, exc_info=True)
+
+        def _unmanage_node_interfaces(node: Node, interfaces: List[Interface]):
+            devs = []
+            for interface in interfaces:
+                try:
+                    devs.append(interface.get_device_name())
+                except Exception as e:
+                    logging.error(
+                        f"Interface: {interface.get_name()} failed to resolve device name"
+                    )
+                    logging.error(e, exc_info=True)
+            if devs:
+                node.execute(
+                    " ; ".join(f"sudo nmcli device set {dev} managed no" for dev in devs),
+                    quiet=True,
+                )
+
+        unmanage_pool = futures.ThreadPoolExecutor(8)
+        unmanage_jobs = {
+            unmanage_pool.submit(_unmanage_node_interfaces, node, ifaces): name
+            for name, (node, ifaces) in node_interfaces.items()
+        }
+        for job in futures.as_completed(unmanage_jobs):
+            name = unmanage_jobs[job]
+            try:
+                job.result()
+            except Exception as e:
+                logging.error(f"Node: {name} failed to become unmanaged")
                 logging.error(e, exc_info=True)
 
         import time
