@@ -223,3 +223,118 @@ class TestTemplateMixinPrettyNames(unittest.TestCase):
     def test_default_pretty_names_empty(self):
         result = TemplateMixin.get_pretty_name_dict()
         self.assertEqual(result, {})
+
+
+def _make_stateful_fim(obj):
+    """Wire obj._fim.set_property/get_property to a simple in-memory store
+    so set_user_data/get_user_data round-trip like they would against a
+    real FIM property bag."""
+    storage = {}
+
+    def _set_property(pname, pval):
+        storage[pname] = str(pval)
+
+    def _get_property(pname):
+        return storage.get(pname, "")
+
+    obj._fim.set_property.side_effect = _set_property
+    obj._fim.get_property.side_effect = _get_property
+    return storage
+
+
+class TestTemplateMixinUserDataCompression(unittest.TestCase):
+    """Tests for the zlib+base64 user_data compression codec."""
+
+    def test_small_payload_stored_plain(self):
+        obj = ConcreteTemplate()
+        storage = _make_stateful_fim(obj)
+
+        small = {"key": "value", "count": 1}
+        obj.set_user_data(small)
+
+        self.assertNotIn("zlib64", storage["user_data"])
+        self.assertEqual(obj.get_user_data(), small)
+
+    def test_large_payload_compressed_and_round_trips(self):
+        obj = ConcreteTemplate()
+        storage = _make_stateful_fim(obj)
+
+        # Realistic-ish monitor_config with long repetitive strings, easily
+        # over the 256 byte threshold.
+        large = {
+            "monitor_config": {
+                "iface_mappings": {
+                    f"iface-{i}": f"os-iface-name-with-a-fairly-long-value-{i}"
+                    for i in range(10)
+                },
+                "description": "x" * 500,
+            }
+        }
+        plain_len = len(json.dumps(large, separators=(",", ":")))
+
+        obj.set_user_data(large)
+
+        stored = storage["user_data"]
+        self.assertIn("zlib64", stored)
+        self.assertLess(len(stored), plain_len)
+        self.assertEqual(obj.get_user_data(), large)
+
+    def test_legacy_plain_json_reads_back_unchanged(self):
+        obj = ConcreteTemplate()
+        storage = _make_stateful_fim(obj)
+
+        legacy = {"old": "format", "nested": {"a": 1}}
+        storage["user_data"] = json.dumps(legacy)
+
+        self.assertEqual(obj.get_user_data(), legacy)
+
+    def test_dict_with_zlib64_key_plus_others_round_trips(self):
+        obj = ConcreteTemplate()
+        storage = _make_stateful_fim(obj)
+
+        tricky = {"zlib64": "not-actually-compressed", "other": "y" * 400}
+        obj.set_user_data(tricky)
+
+        self.assertIn("zlib64", storage["user_data"])
+        self.assertEqual(obj.get_user_data(), tricky)
+
+    def test_corrupted_zlib64_value_returns_raw_dict(self):
+        obj = ConcreteTemplate()
+        storage = _make_stateful_fim(obj)
+
+        corrupted = {"zlib64": "not-valid-base64-or-zlib!!!"}
+        storage["user_data"] = json.dumps(corrupted)
+
+        result = obj.get_user_data()
+        self.assertEqual(result, corrupted)
+
+    def test_large_input_compresses_under_max_size(self):
+        obj = ConcreteTemplate()
+        storage = _make_stateful_fim(obj)
+
+        # ~1.9KB of compressible JSON input.
+        big = {"blob": "abcdefghij" * 190}  # ~1900 bytes of payload
+        plain_len = len(json.dumps(big, separators=(",", ":")))
+        self.assertGreater(plain_len, 1800)
+
+        obj.set_user_data(big)
+
+        stored = storage["user_data"]
+        self.assertLess(len(stored), 2048)
+        self.assertEqual(obj.get_user_data(), big)
+
+    def test_compression_disabled_via_env(self):
+        obj = ConcreteTemplate()
+        storage = _make_stateful_fim(obj)
+
+        import fabrictestbed_extensions.fablib.template_mixin as tm_module
+
+        original = tm_module._USER_DATA_COMPRESS_ENABLED
+        tm_module._USER_DATA_COMPRESS_ENABLED = False
+        try:
+            large = {"description": "x" * 500}
+            obj.set_user_data(large)
+            self.assertNotIn("zlib64", storage["user_data"])
+            self.assertEqual(obj.get_user_data(), large)
+        finally:
+            tm_module._USER_DATA_COMPRESS_ENABLED = original

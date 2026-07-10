@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
+import logging
+import os
+import zlib
 from abc import abstractmethod
 from typing import List, Optional
 
@@ -8,6 +12,16 @@ import jinja2
 from fabrictestbed.slice_editor import UserData
 
 from fabrictestbed_extensions.utils.utils import Utils
+
+# Marker key for compressed user_data payloads.  Deliberately unlikely to
+# collide with a real user key; readers require it to be the ONLY key.
+USER_DATA_COMPRESSED_KEY = "zlib64"
+# Plain JSON payloads at or below this size are stored uncompressed
+# (readability + base64/zlib overhead makes compression counterproductive).
+USER_DATA_COMPRESS_THRESHOLD = 256
+_USER_DATA_COMPRESS_ENABLED = os.environ.get(
+    "FABRIC_COMPRESS_USER_DATA", "1"
+).strip().lower() not in ("0", "false", "no")
 
 
 class TemplateMixin:
@@ -252,24 +266,67 @@ class TemplateMixin:
         """
         Set user data.
 
+        Large payloads are transparently compressed (zlib + base64) to keep
+        the serialized user_data compact; :meth:`get_user_data` decompresses
+        them transparently on read.
+
         :param user_data: a ``dict``.
         :type user_data: dict
         """
-        self.get_fim().set_property(
-            pname="user_data", pval=UserData(json.dumps(user_data))
-        )
+        payload = json.dumps(user_data, separators=(",", ":"))
+
+        if _USER_DATA_COMPRESS_ENABLED and len(payload) > USER_DATA_COMPRESS_THRESHOLD:
+            wrapper = json.dumps(
+                {
+                    USER_DATA_COMPRESSED_KEY: base64.b64encode(
+                        zlib.compress(payload.encode("utf-8"), 9)
+                    ).decode("ascii")
+                },
+                separators=(",", ":"),
+            )
+            if len(wrapper) < len(payload):
+                payload = wrapper
+
+        if len(payload) > 2048:
+            try:
+                name = self.get_name()
+            except Exception:
+                name = None
+            logging.warning(
+                f"user_data payload for {name} is {len(payload)} bytes, "
+                f"exceeding the 2048 byte UserData MAX_SIZE"
+            )
+
+        self.get_fim().set_property(pname="user_data", pval=UserData(payload))
 
     def get_user_data(self) -> dict:
         """
         Get user data.
 
+        Transparently decompresses payloads written by :meth:`set_user_data`
+        when they exceeded the compression threshold.
+
         :return: user data dictionary
         :rtype: dict
         """
         try:
-            return json.loads(str(self.get_fim().get_property(pname="user_data")))
+            result = json.loads(str(self.get_fim().get_property(pname="user_data")))
         except Exception:
             return {}
+
+        if isinstance(result, dict) and set(result.keys()) == {
+            USER_DATA_COMPRESSED_KEY
+        }:
+            value = result[USER_DATA_COMPRESSED_KEY]
+            if isinstance(value, str):
+                try:
+                    return json.loads(
+                        zlib.decompress(base64.b64decode(value)).decode("utf-8")
+                    )
+                except Exception:
+                    return result
+
+        return result
 
     def get_fablib_data(self) -> dict:
         """
