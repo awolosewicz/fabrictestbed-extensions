@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix `CrinkleMonitor.MonitorData` shared mutable default `iface_mappings` causing cross-monitor mapping accumulation
 - Raise `CrinkleMonitor.default_cores` from 2 to 4: the DPDK monitor requires one lcore per port (analyzer uplink + 2 vports) plus a worker, so 2-core monitors exited at startup and forwarded nothing
 - Fix unsigned underflow in the monitor's core-count check (`monitor_source.c`) so running with fewer lcores than ports fails with an accurate message
+- `start_monitor()` now launches the DPDK app detached (nohup, output to `/tmp`); the foreground launch pinned one shared SSH thread-pool worker per monitor for the app's lifetime, eventually starving every later `execute_thread()` call
+- `start_all_monitors(wait=True)` waits on future completion instead of busy-spinning on `Future.running()`, which hung forever for queued or already-finished futures
 
 ## 2.0.7
 

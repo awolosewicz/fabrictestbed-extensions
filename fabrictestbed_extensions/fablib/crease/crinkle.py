@@ -2582,17 +2582,18 @@ class CrinkleSlice(Slice):
         if monitor is None:
             raise Exception("Monitor cannot be None")
         logging.info(f"Starting Crinkle monitor {monitor.data.net_name}")
-        job = None
+        # Launch detached with output redirected so the SSH channel closes as
+        # soon as the app is spawned. Keeping the app in the channel's
+        # foreground pins one shared thread-pool worker per monitor for the
+        # app's whole lifetime, which starves later execute_thread() calls.
+        cmd = (
+            f"sudo nohup ./{REMOTEWORKDIR}/{DPDKNAME} -- {monitor.data.cmd_args}"
+            f" > /tmp/{DPDKNAME}.log 2>&1 &"
+        )
         if wait:
-            monitor.execute(
-                f"sudo ./{REMOTEWORKDIR}/{DPDKNAME} -- {monitor.data.cmd_args} &",
-                quiet=quiet,
-            )
-        else:
-            job = monitor.execute_thread(
-                f"sudo ./{REMOTEWORKDIR}/{DPDKNAME} -- {monitor.data.cmd_args}"
-            )
-        return job
+            monitor.execute(cmd, quiet=quiet)
+            return None
+        return monitor.execute_thread(cmd)
 
     def start_all_monitors(
         self, wait: bool = True, no_return: bool = True
@@ -2611,13 +2612,11 @@ class CrinkleSlice(Slice):
         for monitor in self.monitors.values():
             start_list.append(self.start_monitor(monitor=monitor, wait=False))
         if wait:
-            logging.info(f"Waiting for monitors to finish starting")
-            ctr = 0
-            max = len(start_list)
-            while ctr < max:
-                if start_list[ctr].running():
-                    ctr += 1
-                    logging.info(f"{ctr}/{max} started")
+            logging.info("Waiting for monitors to finish starting")
+            total = len(start_list)
+            for ctr, job in enumerate(futures.as_completed(start_list), 1):
+                job.result()
+                logging.info(f"{ctr}/{total} started")
         if no_return:
             return
         return start_list
