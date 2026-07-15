@@ -92,6 +92,7 @@ bind_layers(IPv6, CMA, nh=PROT_CMA)
 bind_layers(CMA, Ether)
 flowptr = 0
 flows = {}
+flows_lock = threading.Lock()
 
 
 def analyze_packet(
@@ -162,20 +163,24 @@ def analyze_packet(
         thisflow = Flow(
             tx_port, rx_port, ip_src, ip_dst, ip_prot, prot_sport, prot_dport
         )
+        # Worker threads share flows/flowptr; without the lock, two workers
+        # handling the same flow (e.g. the near-simultaneous per-hop reports of
+        # one frame) both mint an id, corrupting flowptr and leaving edges that
+        # reference an Artifact that was never emitted.
         flowhash = hash(thisflow)
-        fid = None
-        if flowhash in flows:
-            fid = flows[flowhash]
-            # print(f'Previous flow {fid}')
-        else:
-            fid = flowptr
-            flowptr += 1
-            flows[flowhash] = fid
-            # print(f'New flow {fid}')
-            # print(f'type:Artifact id:{fid} eth.type:{eth_type} ip.src:{ip_src} ip.dst:{ip_dst} ip.prot:{ip_prot} prot.sport:{prot_sport} prot.dport:{prot_dport}\n')
-            output_lines.append(
-                f"type:Artifact id:{fid} eth.type:{eth_type} ip.src:{ip_src} ip.dst:{ip_dst} ip.prot:{ip_prot} prot.sport:{prot_sport} prot.dport:{prot_dport}\n"
-            )
+        with flows_lock:
+            if flowhash in flows:
+                fid = flows[flowhash]
+            else:
+                fid = flowptr
+                flowptr += 1
+                flows[flowhash] = fid
+        # Re-declare the flow Artifact every packet: SPADE deduplicates vertices
+        # by content, so this is free, and it guarantees the Used/WasGeneratedBy
+        # edges below never reference an Artifact whose batch has not flushed.
+        output_lines.append(
+            f"type:Artifact id:{fid} eth.type:{eth_type} ip.src:{ip_src} ip.dst:{ip_dst} ip.prot:{ip_prot} prot.sport:{prot_sport} prot.dport:{prot_dport}\n"
+        )
         # print('Writing spade edges')
         print(
             f"type:Used from:{rx_port} to:{fid} pkt_id:{uid} size:{size} time:{time} epoch:{epoch}\n"
