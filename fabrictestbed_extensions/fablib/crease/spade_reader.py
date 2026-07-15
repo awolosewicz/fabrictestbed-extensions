@@ -210,7 +210,7 @@ def packet_worker(pkt_queue: queue.Queue, monitors, output_queue: queue.Queue):
 
 
 def writer_worker(output_queue: queue.Queue):
-    with open("spade_pipe", "w") as pipe:
+    with open("spade_pipe", "w") as pipe, open("spade_reader_out.log", "a") as dbg:
         while True:
             lines = output_queue.get()
             if lines is None:
@@ -218,7 +218,9 @@ def writer_worker(output_queue: queue.Queue):
                 break
             for line in lines:
                 pipe.write(line)
+                dbg.write(line)
             pipe.flush()
+            dbg.flush()
             output_queue.task_done()
 
 
