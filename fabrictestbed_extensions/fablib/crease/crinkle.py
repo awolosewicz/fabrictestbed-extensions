@@ -2295,7 +2295,7 @@ class CrinkleSlice(Slice):
         else:
             graph_build += """\\$graph0 = \\$base\n"""
         if time_filter != "":
-            graph_build += f"""\\$graph1 = \\$graph0.getPath(\\$graph0.getEdge({time_filter}).limit(1000).getEdgeEndpoints(), \\$graph0.getVertex(\\"type\\" == 'Agent'), 1) + \\$graph0.getEdge({time_filter}).limit(1000) + \\$graph0.getEdge({time_filter}).limit(1000).getEdgeEndpoints()\n"""
+            graph_build += f"""\\$graph1 = \\$graph0.getPath(\\$graph0.getEdge({time_filter}).limit(10000000).getEdgeEndpoints(), \\$graph0.getVertex(\\"type\\" == 'Agent'), 1) + \\$graph0.getEdge({time_filter}).limit(10000000) + \\$graph0.getEdge({time_filter}).limit(10000000).getEdgeEndpoints()\n"""
         else:
             graph_build += """\\$graph1 = \\$graph0\n"""
         graph_build += f"""\\$graph2 = \\$graph1.getLineage(\\$graph1.getVertex({spade_filter}), 1, 'b')\n\\$graph3 = \\$graph2 + \\$base.getPath(\\$graph2.getVertex(\\"type\\" == 'Process'), \\$base.getVertex(\\"type\\" == 'Agent'), 1)"""
